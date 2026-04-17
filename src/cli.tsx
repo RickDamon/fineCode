@@ -15,7 +15,10 @@ import { resolveConfig, CONFIG_FILE } from './config/Config.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
 import { scheduleUpdateCheck } from './utils/updateCheck.js';
-import type { ToolDefinition } from './core/types.js';
+import { Session } from './session/Session.js';
+import { connectMCPServers, disconnectMCPServers, type MCPServerRecord } from './mcp/McpClient.js';
+import { readConfig } from './config/Config.js';
+import type { ToolDefinition, Message } from './core/types.js';
 
 interface PermissionRequest {
   tool: ToolDefinition;
@@ -27,7 +30,6 @@ interface PermissionRequest {
 function readPkgVersion(): string {
   try {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    // When shipped via npm, package.json sits next to dist/.
     const candidates = [
       path.join(here, '..', 'package.json'),
       path.join(here, '..', '..', 'package.json'),
@@ -52,7 +54,7 @@ async function main() {
     .description('A minimal, model-agnostic coding agent inspired by Claude Code')
     .version(version, '-v, --version', 'output the current version');
 
-  // --- `fine init` subcommand ---
+  // --- Subcommands ---
   program
     .command('init')
     .description('Interactive setup: saves defaults to ~/.fineCode/config.json')
@@ -61,7 +63,6 @@ async function main() {
       process.exit(0);
     });
 
-  // --- `fine config` helpers ---
   program
     .command('config')
     .description(`Print the current config file path (${CONFIG_FILE})`)
@@ -70,12 +71,28 @@ async function main() {
       process.exit(0);
     });
 
-  // --- `fine doctor` diagnostics ---
   program
     .command('doctor')
     .description('Diagnose environment and configuration (node, config, network, API key, models)')
     .action(async () => {
       await runDoctor();
+    });
+
+  program
+    .command('sessions')
+    .description('List recent sessions and their ids')
+    .action(() => {
+      const list = Session.list(30);
+      if (list.length === 0) {
+        console.log('No sessions found.');
+        process.exit(0);
+      }
+      for (const m of list) {
+        const ts = new Date(m.lastAt).toISOString();
+        const title = (m.title ?? '(untitled)').replace(/\s+/g, ' ').slice(0, 60);
+        console.log(`${m.id}  ${ts}  [${m.model}]  ${title}`);
+      }
+      process.exit(0);
     });
 
   // --- Default command: launch REPL ---
@@ -87,6 +104,8 @@ async function main() {
     .option('--provider <type>', 'Force provider: openai | anthropic | ollama')
     .option('--bypass', 'Auto-approve all tool calls (yolo mode)', false)
     .option('--cwd <dir>', 'Working directory (defaults to current)')
+    .option('-c, --continue', 'Continue the most recent session for this directory', false)
+    .option('--resume <id>', 'Resume a specific session by id (see `fine sessions`)')
     .action(async (opts: CliFlags) => {
       await launchRepl(opts, version);
     });
@@ -102,14 +121,14 @@ interface CliFlags {
   provider?: 'openai' | 'anthropic' | 'ollama';
   bypass?: boolean;
   cwd?: string;
+  continue?: boolean;
+  resume?: string;
 }
 
 /** Parse resolved config and boot the Ink REPL. */
 async function launchRepl(opts: CliFlags, version: string): Promise<void> {
-  // Fire the update check early (non-blocking).
   scheduleUpdateCheck(version);
 
-  // Resolve config: CLI flags > env > ~/.fineCode/config.json
   const resolved = resolveConfig({
     model: opts.model,
     apiKey: opts.apiKey,
@@ -119,7 +138,6 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     bypass: opts.bypass,
   });
 
-  // First-run guidance: if no model and no config file exists, point user to `fine init`.
   if (!resolved.model) {
     if (!resolved.fromFile) {
       console.error('No model configured.');
@@ -132,7 +150,6 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     process.exit(1);
   }
 
-  // Resolve preset → baseUrl fallback (preset only supplies baseUrl when not explicit).
   let baseUrl = resolved.baseUrl;
   if (resolved.preset) {
     const preset = PRESETS[resolved.preset];
@@ -145,7 +162,6 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     baseUrl = baseUrl ?? preset.baseUrl;
   }
 
-  // API key required except for ollama.
   let apiKey = resolved.apiKey;
   const isOllama = resolved.preset === 'ollama' || resolved.provider === 'ollama';
   if (!apiKey && !isOllama) {
@@ -161,18 +177,44 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
 
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
 
-  // Build provider.
+  // --- Session: new / continue / resume ---
+  let session: Session;
+  let initialHistory: Message[] = [];
+  if (opts.resume) {
+    const loaded = Session.load(opts.resume);
+    if (!loaded) {
+      console.error(`Session not found: ${opts.resume}`);
+      console.error('Run `fine sessions` to list valid ids.');
+      process.exit(1);
+    }
+    session = loaded.session;
+    initialHistory = loaded.messages;
+  } else if (opts.continue) {
+    const recent = Session.mostRecent(cwd);
+    if (!recent) {
+      console.error('No previous session found for this directory.');
+      console.error('Start a new one: `fine` (no flags).');
+      process.exit(1);
+    }
+    const loaded = Session.load(recent.id);
+    if (!loaded) {
+      console.error(`Failed to load session ${recent.id}.`);
+      process.exit(1);
+    }
+    session = loaded.session;
+    initialHistory = loaded.messages;
+  } else {
+    session = Session.create({ cwd, model: resolved.model });
+  }
+
   const provider = createProvider({
-    model: resolved.model,
+    model: session.getMeta().model, // honor stored model on resume
     apiKey,
     baseUrl,
     provider: resolved.provider,
   });
 
-  // Build system prompt with live env info.
   const systemPrompt = await buildSystemPrompt(cwd);
-
-  // Permission manager (and bridge between UI and agent).
   const permissionManager = new PermissionManager({ bypass: resolved.bypass });
 
   let uiPermissionHandler: ((req: PermissionRequest) => void) | null = null;
@@ -196,17 +238,41 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     permissionPrompt,
     systemPrompt,
     cwd,
+    session,
+    initialHistory,
   });
 
-  // Launch UI.
+  // --- Connect MCP servers (if any) and register their tools ---
+  const stored = readConfig();
+  let mcpRecords: MCPServerRecord[] = [];
+  if (stored.mcpServers && Object.keys(stored.mcpServers).length > 0) {
+    const { tools: mcpTools, records } = await connectMCPServers(stored.mcpServers, {
+      log: line => process.stderr.write(line + '\n'),
+    });
+    mcpRecords = records;
+    for (const t of mcpTools) agent.registerTool(t);
+  }
+
+  // The REPL needs a mutable session reference so /clear can swap it.
+  // eslint-disable-next-line prefer-const
+  let currentSession = session;
+  const setSession = (s: Session) => {
+    currentSession = s;
+  };
+  void currentSession;
+
   const { waitUntilExit } = render(
     React.createElement(REPL, {
       agent,
       modelName: provider.name,
+      session,
+      setSession,
       onPermissionRequest: registerHandler,
     }),
   );
   await waitUntilExit();
+  session.close();
+  if (mcpRecords.length > 0) await disconnectMCPServers(mcpRecords);
 }
 
 main().catch(err => {

@@ -2,16 +2,31 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
-import type { Agent, AgentEvent } from '../core/Agent.js';
+import type { Agent } from '../core/Agent.js';
 import type { ToolDefinition } from '../core/types.js';
 import { ProviderError } from '../core/ProviderError.js';
+import type { Session } from '../session/Session.js';
+import { formatCost, formatTokens, getModelRate } from '../constants/pricing.js';
+import { tryRunSlashCommand, type SlashResult } from '../commands/slash.js';
+import { shouldAutoCompact, compactHistory, KEEP_TAIL_DEFAULT } from '../commands/compact.js';
+
+const MAX_TOOL_OUTPUT_PREVIEW = 400;
+const MAX_TOOL_OUTPUT_LINES_EXPANDED = 40;
 
 type DisplayItem =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; name: string; preview: string; status: 'running' | 'ok' | 'error' | 'denied'; output?: string }
+  | {
+      kind: 'tool';
+      name: string;
+      preview: string;
+      status: 'running' | 'ok' | 'error' | 'denied';
+      output?: string;
+      outputBytes?: number;
+      outputLines?: number;
+    }
   | { kind: 'error'; text: string; hint?: string }
-  | { kind: 'info'; text: string };
+  | { kind: 'info'; text: string; level?: 'info' | 'ok' | 'warn' | 'error' };
 
 interface PermissionRequest {
   tool: ToolDefinition;
@@ -22,25 +37,45 @@ interface PermissionRequest {
 interface Props {
   agent: Agent;
   modelName: string;
+  /** Must be passed by the caller (Session + setter so /clear can swap it). */
+  session: Session;
+  setSession: (s: Session) => void;
   onPermissionRequest: (register: (req: PermissionRequest) => void) => void;
 }
 
-export function REPL({ agent, modelName, onPermissionRequest }: Props) {
+export function REPL({ agent, modelName, session, setSession, onPermissionRequest }: Props) {
   const { exit } = useApp();
   const [items, setItems] = useState<DisplayItem[]>([
-    { kind: 'info', text: `harness · model: ${modelName} · type your question, Ctrl+C to exit` },
+    {
+      kind: 'info',
+      text: `fine · model: ${modelName} · session: ${session.id} · /help for commands · Ctrl+C to exit`,
+    },
   ]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
+  const [headerModel, setHeaderModel] = useState(modelName);
+  const [usage, setUsage] = useState({
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cumulativeCost: 0,
+  });
+  const [compacting, setCompacting] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Register permission handler
+  // Sync usage from agent whenever a tick happens. Seed from agent in case we resumed.
+  useEffect(() => {
+    const s = agent.getCostSummary();
+    setUsage(s);
+  }, [agent]);
+
+  // Register permission handler.
   useEffect(() => {
     onPermissionRequest(req => setPermission(req));
   }, [onPermissionRequest]);
 
-  // Permission dialog key handler
+  // Permission dialog key handler.
   useInput(
     (ch, key) => {
       if (!permission) return;
@@ -58,10 +93,10 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
     { isActive: permission !== null },
   );
 
-  // Ctrl+C handling during busy
+  // Ctrl+C handling during busy.
   useInput(
-    (_ch, key) => {
-      if (key.ctrl && _ch === 'c') {
+    (ch, key) => {
+      if (key.ctrl && ch === 'c') {
         if (busy && abortRef.current) {
           abortRef.current.abort();
         } else {
@@ -72,16 +107,67 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
     { isActive: !permission },
   );
 
+  const pushLines = (lines: string[], level: DisplayItem['kind'] | 'ok' | 'warn' = 'info') => {
+    const mapped = lines.map<DisplayItem>(text => {
+      if (level === 'error') return { kind: 'error', text };
+      if (level === 'ok' || level === 'warn' || level === 'info')
+        return { kind: 'info', text, level };
+      return { kind: 'info', text };
+    });
+    setItems(prev => [...prev, ...mapped]);
+  };
+
   const submit = async (text: string) => {
     if (!text.trim() || busy) return;
     setInput('');
-    setItems(prev => [...prev, { kind: 'user', text }]);
-    setBusy(true);
 
+    // Slash command path — short-circuits the agent loop.
+    if (text.startsWith('/')) {
+      setItems(prev => [...prev, { kind: 'user', text }]);
+      const result: SlashResult | null = await tryRunSlashCommand(text.trim(), {
+        agent,
+        session,
+        setSession,
+        onModelChange: name => setHeaderModel(name),
+        onExit: () => exit(),
+      });
+      if (result) {
+        pushLines(result.lines, result.level ?? 'info');
+      }
+      return;
+    }
+
+    setItems(prev => [...prev, { kind: 'user', text }]);
+
+    // Auto-compact check BEFORE firing the turn, so a huge context doesn't crash the request.
+    const model = session.getMeta().model;
+    if (shouldAutoCompact(model, usage.totalTokens)) {
+      setCompacting(true);
+      try {
+        const { summary, kept } = await compactHistory(agent.getHistory(), model, KEEP_TAIL_DEFAULT);
+        const dropped = agent.compactWithSummary(summary, kept);
+        setItems(prev => [
+          ...prev,
+          {
+            kind: 'info',
+            level: 'warn',
+            text: `Auto-compacted ${dropped} messages (approaching context window).`,
+          },
+        ]);
+      } catch (e) {
+        setItems(prev => [
+          ...prev,
+          { kind: 'error', text: `Auto-compact failed: ${(e as Error).message}` },
+        ]);
+      } finally {
+        setCompacting(false);
+      }
+    }
+
+    setBusy(true);
     const ac = new AbortController();
     abortRef.current = ac;
 
-    let currentAssistantText = '';
     let currentAssistantIdx = -1;
 
     try {
@@ -89,19 +175,18 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
         await new Promise(r => setImmediate(r)); // yield to render
 
         if (event.type === 'assistant_text') {
-          currentAssistantText = event.buffer;
           setItems(prev => {
             const next = [...prev];
             if (currentAssistantIdx === -1) {
               currentAssistantIdx = next.length;
-              next.push({ kind: 'assistant', text: currentAssistantText });
+              next.push({ kind: 'assistant', text: event.buffer });
             } else {
-              next[currentAssistantIdx] = { kind: 'assistant', text: currentAssistantText };
+              next[currentAssistantIdx] = { kind: 'assistant', text: event.buffer };
             }
             return next;
           });
         } else if (event.type === 'assistant_done') {
-          currentAssistantIdx = -1; // reset for next turn
+          currentAssistantIdx = -1;
         } else if (event.type === 'tool_start') {
           setItems(prev => [
             ...prev,
@@ -115,14 +200,16 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
         } else if (event.type === 'tool_result') {
           setItems(prev => {
             const next = [...prev];
-            // Update last running tool with this name
             for (let i = next.length - 1; i >= 0; i--) {
               const it = next[i]!;
               if (it.kind === 'tool' && it.status === 'running' && it.name === event.tool.name) {
+                const lineCount = event.content.split('\n').length;
                 next[i] = {
                   ...it,
                   status: event.isError ? 'error' : 'ok',
-                  output: truncate(event.content, 400),
+                  output: foldLongOutput(event.content),
+                  outputBytes: event.content.length,
+                  outputLines: lineCount,
                 };
                 break;
               }
@@ -140,6 +227,13 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
               }
             }
             return next;
+          });
+        } else if (event.type === 'usage') {
+          setUsage({
+            promptTokens: agent.getCostSummary().promptTokens,
+            completionTokens: agent.getCostSummary().completionTokens,
+            totalTokens: agent.getCostSummary().totalTokens,
+            cumulativeCost: event.cumulativeCost,
           });
         } else if (event.type === 'error') {
           const err = event.error;
@@ -159,6 +253,10 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
     }
   };
 
+  const model = session.getMeta().model;
+  const ctxWindow = getModelRate(model).contextWindow;
+  const ctxPercent = ctxWindow ? Math.min(100, Math.round((usage.totalTokens / ctxWindow) * 100)) : 0;
+
   return (
     <Box flexDirection="column">
       {items.map((item, i) => (
@@ -174,14 +272,33 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
         </Box>
       )}
 
+      {compacting && (
+        <Box>
+          <Text color="magenta">
+            <Spinner type="dots" />
+          </Text>
+          <Text dimColor> compacting history…</Text>
+        </Box>
+      )}
+
       {permission && <PermissionDialog req={permission} />}
 
-      {!busy && !permission && (
+      {!busy && !permission && !compacting && (
         <Box marginTop={1}>
           <Text color="green">❯ </Text>
           <TextInput value={input} onChange={setInput} onSubmit={submit} />
         </Box>
       )}
+
+      {/* Status bar — always visible */}
+      <Box marginTop={1}>
+        <Text dimColor>
+          {headerModel} · {formatTokens(usage.totalTokens)} tokens
+          {ctxWindow ? ` (${ctxPercent}% of ${formatTokens(ctxWindow)})` : ''}
+          {' · '}
+          {formatCost(usage.cumulativeCost)}
+        </Text>
+      </Box>
     </Box>
   );
 }
@@ -190,9 +307,7 @@ function ItemView({ item }: { item: DisplayItem }) {
   if (item.kind === 'user') {
     return (
       <Box marginTop={1}>
-        <Text color="green" bold>
-          ❯{' '}
-        </Text>
+        <Text color="green" bold>❯ </Text>
         <Text>{item.text}</Text>
       </Box>
     );
@@ -223,6 +338,12 @@ function ItemView({ item }: { item: DisplayItem }) {
           <Text color={statusColor}>{statusIcon} </Text>
           <Text color="cyan">{item.name}</Text>
           <Text dimColor> · {item.preview}</Text>
+          {item.outputBytes != null && item.outputBytes > MAX_TOOL_OUTPUT_PREVIEW && (
+            <Text dimColor>
+              {' '}
+              ({item.outputLines} lines, {item.outputBytes} bytes)
+            </Text>
+          )}
         </Box>
         {item.output && (
           <Box paddingLeft={2}>
@@ -244,9 +365,20 @@ function ItemView({ item }: { item: DisplayItem }) {
       </Box>
     );
   }
+  // info with optional level
+  const color =
+    item.level === 'ok'
+      ? 'green'
+      : item.level === 'warn'
+        ? 'yellow'
+        : item.level === 'error'
+          ? 'red'
+          : undefined;
   return (
     <Box>
-      <Text dimColor>{item.text}</Text>
+      <Text color={color} dimColor={!color}>
+        {item.text}
+      </Text>
     </Box>
   );
 }
@@ -278,7 +410,17 @@ function safeParseArgs(s: string): any {
   }
 }
 
-function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max) + `\n…(${s.length - max} more bytes)`;
+/**
+ * Fold very long tool output: keep head and tail, drop the middle with a marker.
+ * This keeps the REPL readable when a command dumps thousands of lines.
+ */
+function foldLongOutput(s: string): string {
+  if (s.length <= MAX_TOOL_OUTPUT_PREVIEW) return s;
+  const lines = s.split('\n');
+  if (lines.length <= MAX_TOOL_OUTPUT_LINES_EXPANDED) {
+    return s.slice(0, MAX_TOOL_OUTPUT_PREVIEW) + `\n…(${s.length - MAX_TOOL_OUTPUT_PREVIEW} more bytes)`;
+  }
+  const head = lines.slice(0, 15).join('\n');
+  const tail = lines.slice(-10).join('\n');
+  return `${head}\n…(${lines.length - 25} lines folded)…\n${tail}`;
 }

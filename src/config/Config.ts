@@ -30,6 +30,20 @@ export interface StoredConfig {
   bypass?: boolean;
   /** Last time we checked for a new npm version (unix ms). */
   lastUpdateCheck?: number;
+  /**
+   * MCP servers to auto-connect on startup. Keys are labels; values are spawn configs.
+   * See src/mcp/McpClient.ts for the schema.
+   */
+  mcpServers?: Record<
+    string,
+    {
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+      label?: string;
+    }
+  >;
 }
 
 export const CONFIG_DIR = path.join(os.homedir(), '.fineCode');

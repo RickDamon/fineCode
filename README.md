@@ -112,11 +112,88 @@ fine -m gpt-4o --bypass
 | 命令 | 作用 |
 |------|------|
 | `fine` | 启动 REPL（使用配置文件 / env / flag 解析出的参数） |
-| `fine init` | 交互式配置向导，写入 `~/.fineCode/config.json`；能联网时自动拉取 `/v1/models` 供你选择 |
-| `fine doctor` | 诊断环境与配置：Node 版本 / 配置文件 / 网络连通性 / API key 可用性 / 模型是否受服务端支持 |
+| `fine -c` | 继续当前目录最近一次会话 |
+| `fine --resume <id>` | 恢复指定 id 的会话（用 `fine sessions` 查 id） |
+| `fine sessions` | 列出最近的会话 |
+| `fine init` | 交互式配置向导；能联网时自动拉取 `/v1/models` 供你选择 |
+| `fine doctor` | 诊断环境与配置（Node / 配置 / 网络 / API key / 模型） |
 | `fine config` | 打印配置文件路径 |
-| `fine --version` | 查看版本 |
-| `fine --help` | 查看完整帮助 |
+
+## REPL 内斜杠命令
+
+进入 REPL 后，输入 `/` 开头的命令可以不退出就操作：
+
+| 命令 | 作用 |
+|------|------|
+| `/help` | 列出所有可用命令 |
+| `/cost` | 显示当前会话的 token / 费用 |
+| `/model <name>` | 热切换模型（不退出 REPL） |
+| `/clear` | 开启全新会话（清空历史，配置保留） |
+| `/compact` | 手动压缩历史（把老消息换成摘要） |
+| `/sessions` | 列出最近的会话 |
+| `/rewind` | 回滚本次会话中所有被 AI 改过的文件 |
+| `/exit` | 退出 |
+
+## 会话持久化
+
+每次对话自动保存到 `~/.fineCode/sessions/<session-id>.jsonl`（append-only），
+进程被 `Ctrl+C` 杀掉也不会丢。下次 `fine -c` 就能接着聊。
+
+快照：每次 AI 要用 `write_file` / `edit_file` 改文件**之前**，原文件会被备份到
+`~/.fineCode/sessions/<session-id>.snapshots/`。后悔了就 `/rewind` 一键还原。
+
+## 上下文窗口
+
+状态栏实时显示：
+```
+deepseek-chat · 24.5k tokens (37% of 65.5k) · $0.024
+```
+
+接近窗口上限（> 70%）时 fineCode 会**自动压缩**历史：让同一个模型 summarize
+老消息，保留最近 6 条原样。触发时你会看到：
+```
+Auto-compacted 18 messages (approaching context window).
+```
+
+也可以随时手动 `/compact`。
+
+## 项目级 / 用户级指令（FINE.md）
+
+在项目根目录或任一父目录放 `FINE.md`（或 `CLAUDE.md`），内容会自动拼到
+system prompt 里。用于记住项目约定：
+
+```markdown
+# FINE.md
+- 这个项目用 pnpm，不要用 npm。
+- 所有 API 路由放在 src/api/，组件放在 src/components/。
+- 不要直接 commit 到 main 分支。
+```
+
+全局规则可以放 `~/.fineCode/FINE.md`。
+
+## 并发工具执行
+
+模型一次返回多个工具调用时，**只读工具（read_file / grep / glob / ls / todo_write）
+会被自动并行化**，写操作保持串行。一次读 5 个文件的耗时从 5× 降到 ~1×。
+
+## MCP (Model Context Protocol) 扩展
+
+在配置文件里声明 MCP server，启动时会自动连接并把它们的 tools 注册进来：
+
+```json
+{
+  "model": "deepseek-chat",
+  "preset": "deepseek",
+  "apiKey": "sk-...",
+  "mcpServers": {
+    "github":   { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } },
+    "postgres": { "command": "mcp-server-postgres", "args": ["postgresql://..."] }
+  }
+}
+```
+
+MCP 工具在 REPL 中以 `<server>__<tool>` 形式出现（例如 `github__create_pr`），
+因为可能有副作用，默认都需要用户授权。
 
 ## 错误诊断
 

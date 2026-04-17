@@ -1,11 +1,17 @@
-import { platform, hostname, userInfo } from 'node:os';
+import { platform, hostname, userInfo, homedir } from 'node:os';
 import { promises as fs } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 /**
  * Build a dynamic system prompt with environment context.
  * Philosophy (from Claude Code): rich context > clever prompting.
+ *
+ * Layout:
+ *   CORE_PROMPT
+ *   # Environment  — cwd, platform, user, git, top-level files
+ *   # User rules   — merged from ~/.fineCode/FINE.md (or CLAUDE.md) if present
+ *   # Project rules — merged from <cwd>/FINE.md, walking up to repo root
  */
 export async function buildSystemPrompt(cwd: string): Promise<string> {
   const envLines: string[] = [];
@@ -21,19 +27,69 @@ export async function buildSystemPrompt(cwd: string): Promise<string> {
   const topLevel = await getTopLevelListing(cwd);
   if (topLevel) envLines.push(`\nTop-level files:\n${topLevel}`);
 
-  return `${CORE_PROMPT}
+  const sections = [CORE_PROMPT, `# Environment\n${envLines.join('\n')}`];
 
-# Environment
-${envLines.join('\n')}
-`;
+  const userRules = await readFirstExisting([
+    join(homedir(), '.fineCode', 'FINE.md'),
+    join(homedir(), '.fineCode', 'CLAUDE.md'),
+  ]);
+  if (userRules) sections.push(`# User rules\n${userRules.trim()}`);
+
+  const projectRules = await readProjectRules(cwd);
+  if (projectRules) sections.push(`# Project rules\n${projectRules.trim()}`);
+
+  return sections.join('\n\n') + '\n';
 }
 
-const CORE_PROMPT = `You are harness, an interactive CLI coding assistant. You help users with software engineering tasks in their local workspace.
+/**
+ * Walk from `cwd` up to filesystem root, concatenating any FINE.md / CLAUDE.md
+ * we find. Closer files (more specific) come last, which is the conventional
+ * "later overrides earlier" order.
+ */
+async function readProjectRules(cwd: string): Promise<string | null> {
+  const chunks: string[] = [];
+  const seen = new Set<string>();
+  let dir = cwd;
+  // Safety cap so a weird filesystem loop never stalls us.
+  for (let i = 0; i < 20; i++) {
+    if (seen.has(dir)) break;
+    seen.add(dir);
+
+    for (const name of ['FINE.md', 'CLAUDE.md']) {
+      const p = join(dir, name);
+      try {
+        const body = await fs.readFile(p, 'utf8');
+        chunks.unshift(`<!-- ${p} -->\n${body}`);
+        break; // only one of FINE.md / CLAUDE.md per dir
+      } catch {
+        /* not present, try the other name */
+      }
+    }
+
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return chunks.length > 0 ? chunks.join('\n\n') : null;
+}
+
+async function readFirstExisting(paths: string[]): Promise<string | null> {
+  for (const p of paths) {
+    try {
+      return await fs.readFile(p, 'utf8');
+    } catch {
+      /* not present */
+    }
+  }
+  return null;
+}
+
+const CORE_PROMPT = `You are fine, an interactive CLI coding assistant. You help users with software engineering tasks in their local workspace.
 
 # Core Principles
 - Be concise. Skip pleasantries. Get to the point.
 - Use tools instead of asking the user questions that can be answered by inspecting the codebase.
-- Prefer multiple parallel tool calls when operations are independent.
+- Prefer multiple parallel tool calls when operations are independent (reading files, grep, ls).
 - When making changes, briefly explain what you will do, then do it.
 - After making code changes, do not add tangential narration — the diff speaks for itself.
 

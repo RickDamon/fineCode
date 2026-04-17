@@ -32,6 +32,10 @@ export interface ToolDefinition<Input = unknown> {
   /**
    * Whether this tool requires user approval before execution.
    * 'always' — always ask; 'never' — auto-approve (read-only); 'once' — ask then remember.
+   *
+   * Note: `'never'` is ALSO the signal for the concurrency partitioner that this tool
+   * is safe to run in parallel with other 'never' tools. Any 'always'/'once' tool is
+   * treated as having side-effects and is executed serially relative to others.
    */
   needsPermission: 'always' | 'never' | 'once';
   /**
@@ -49,6 +53,10 @@ export interface ToolDefinition<Input = unknown> {
 export interface ToolExecutionContext {
   cwd: string;
   abortSignal: AbortSignal;
+  /** Current session (if any). Tools may record snapshots here for rewind. */
+  session?: import('../session/Session.js').Session;
+  /** Tool-call id assigned by the model; useful for snapshot correlation. */
+  toolCallId?: string;
 }
 
 export interface ToolResult {

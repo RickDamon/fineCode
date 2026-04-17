@@ -1,6 +1,8 @@
 import type { Provider } from './Provider.js';
-import type { Message, StreamEvent, ToolCall, ToolDefinition } from './types.js';
+import type { Message, ToolCall, ToolDefinition, Usage } from './types.js';
 import type { PermissionManager, PermissionPrompt } from '../permission/PermissionManager.js';
+import type { Session } from '../session/Session.js';
+import { computeCost } from '../constants/pricing.js';
 
 export type AgentEvent =
   | { type: 'assistant_text'; delta: string; buffer: string }
@@ -9,6 +11,9 @@ export type AgentEvent =
   | { type: 'tool_result'; call: ToolCall; tool: ToolDefinition; content: string; isError: boolean }
   | { type: 'tool_denied'; call: ToolCall; tool: ToolDefinition }
   | { type: 'turn_done' }
+  | { type: 'usage'; usage: Usage; model: string; cost: number; cumulativeCost: number }
+  | { type: 'compacted'; droppedMessages: number; summary: string }
+  | { type: 'info'; text: string }
   | { type: 'error'; error: Error };
 
 export interface AgentConfig {
@@ -19,28 +24,110 @@ export interface AgentConfig {
   systemPrompt: string;
   cwd: string;
   maxTurns?: number;
+  /** Optional session for persistence, cost tracking, snapshots. */
+  session?: Session;
+  /** Messages to pre-populate (used on resume). */
+  initialHistory?: Message[];
+  /** Max parallel read-only tool calls per partition. Default 10. */
+  maxParallelTools?: number;
 }
 
 /**
  * Agent — the core harness loop.
  *
  * Implements the "implicit agent" philosophy: no DAG, no chain, no plan.
- * We just loop: send messages → get response → if tool calls, execute them,
- * append results to history, loop again. The model decides what to do each turn.
+ * Loop: send messages → receive stream → execute any tool calls → loop.
+ *
+ * Features layered on top:
+ *   - Session persistence (opt-in via config.session)
+ *   - Token/cost accounting (via AgentEvent: 'usage')
+ *   - Concurrent read-only tool execution (tools with needsPermission='never')
+ *   - Host-triggered context compaction (see compactWithSummary)
  */
 export class Agent {
   private config: AgentConfig;
-  private history: Message[] = [];
+  private history: Message[];
   private toolMap: Map<string, ToolDefinition>;
+  private provider: Provider;
+  private cumulativeCost = 0;
+  private totalPromptTokens = 0;
+  private totalCompletionTokens = 0;
 
   constructor(config: AgentConfig) {
     this.config = config;
+    this.provider = config.provider;
+    this.history = [...(config.initialHistory ?? [])];
     this.toolMap = new Map(config.tools.map(t => [t.name, t]));
+
+    // If we have a session + initial history, seed the totals so /cost is accurate.
+    const meta = config.session?.getMeta();
+    if (meta) {
+      this.cumulativeCost = meta.totalCost;
+      this.totalPromptTokens = meta.totalPromptTokens;
+      this.totalCompletionTokens = meta.totalCompletionTokens;
+    }
+  }
+
+  /** Hot-swap the provider (used by /model command). */
+  setProvider(provider: Provider): void {
+    this.provider = provider;
+    this.config.provider = provider;
+  }
+
+  /** Register an additional tool at runtime (used by MCP client after discovery). */
+  registerTool(tool: ToolDefinition): void {
+    this.toolMap.set(tool.name, tool);
+    // Keep config.tools in sync so the provider sees the tool on the NEXT turn.
+    this.config.tools = [...this.config.tools, tool];
+  }
+
+  /** Erase in-memory history. Does NOT touch the persisted session log —
+   *  callers that want a fresh session must create a new Session object. */
+  clearHistory(): void {
+    this.history = [];
+  }
+
+  getHistory(): Message[] {
+    return [...this.history];
+  }
+
+  getCostSummary(): {
+    cumulativeCost: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  } {
+    return {
+      cumulativeCost: this.cumulativeCost,
+      promptTokens: this.totalPromptTokens,
+      completionTokens: this.totalCompletionTokens,
+      totalTokens: this.totalPromptTokens + this.totalCompletionTokens,
+    };
+  }
+
+  /**
+   * Replace old history with a summary placeholder + tail.
+   * Called by the host (REPL) when auto-compact decides to fire.
+   * Returns the number of original messages that were dropped.
+   */
+  compactWithSummary(summary: string, keepTail: number): number {
+    const dropped = Math.max(0, this.history.length - keepTail);
+    if (dropped === 0) return 0;
+    const tail = this.history.slice(-keepTail);
+    this.history = [
+      { role: 'user', content: `[Previous conversation summary]\n${summary}` },
+      ...tail,
+    ];
+    this.config.session?.recordCompact(dropped, summary);
+    return dropped;
   }
 
   /** Run one user turn to completion. Yields events as they happen. */
   async *run(userInput: string, abortSignal: AbortSignal): AsyncGenerator<AgentEvent> {
-    this.history.push({ role: 'user', content: userInput });
+    const userMsg: Message = { role: 'user', content: userInput };
+    this.history.push(userMsg);
+    this.config.session?.recordMessage(userMsg);
+
     const maxTurns = this.config.maxTurns ?? 50;
 
     for (let turn = 0; turn < maxTurns; turn++) {
@@ -49,13 +136,13 @@ export class Agent {
         return;
       }
 
-      // Stream this turn's assistant response, yielding text events live
       let textBuffer = '';
       const toolCallsByIndex: { id: string; name: string; args: string }[] = [];
       const toolIdToIndex = new Map<string, number>();
       let errored: Error | null = null;
+      let turnUsage: Usage | undefined;
 
-      const stream = this.config.provider.stream({
+      const stream = this.provider.stream({
         messages: this.history,
         tools: this.config.tools,
         systemPrompt: this.config.systemPrompt,
@@ -77,6 +164,7 @@ export class Agent {
           errored = event.error;
           break;
         } else if (event.type === 'done') {
+          turnUsage = event.usage;
           break;
         }
       }
@@ -84,6 +172,22 @@ export class Agent {
       if (errored) {
         yield { type: 'error', error: errored };
         return;
+      }
+
+      // Record usage + cost.
+      if (turnUsage) {
+        const cost = computeCost(this.provider.model, turnUsage.promptTokens, turnUsage.completionTokens);
+        this.cumulativeCost += cost;
+        this.totalPromptTokens += turnUsage.promptTokens;
+        this.totalCompletionTokens += turnUsage.completionTokens;
+        this.config.session?.recordUsage(turnUsage, this.provider.model, cost);
+        yield {
+          type: 'usage',
+          usage: turnUsage,
+          model: this.provider.model,
+          cost,
+          cumulativeCost: this.cumulativeCost,
+        };
       }
 
       const toolCalls: ToolCall[] = toolCallsByIndex.map(tc => ({
@@ -98,22 +202,77 @@ export class Agent {
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       };
       this.history.push(assistantMsg);
+      this.config.session?.recordMessage(assistantMsg);
       yield { type: 'assistant_done', message: assistantMsg };
 
-      // No tool calls → turn is done
       if (toolCalls.length === 0) {
         yield { type: 'turn_done' };
         return;
       }
 
-      // Execute tool calls in order, feeding results into history
-      for (const tc of toolCalls) {
-        yield* this.executeTool(tc, abortSignal);
+      // Partition into concurrent-safe groups and execute.
+      const partitions = partitionToolCalls(toolCalls, this.toolMap);
+      for (const partition of partitions) {
+        yield* this.executePartition(partition, abortSignal);
       }
-      // Loop: model sees tool results, may emit more tool calls or finish
+      // loop
     }
 
     yield { type: 'error', error: new Error(`Max turns (${maxTurns}) exceeded`) };
+  }
+
+  /**
+   * Execute a group of tool calls. If all are read-only (needsPermission='never')
+   * they run concurrently; otherwise we fall back to serial execution.
+   */
+  private async *executePartition(
+    calls: ToolCall[],
+    abortSignal: AbortSignal,
+  ): AsyncGenerator<AgentEvent> {
+    if (calls.length === 0) return;
+
+    // Single call → serial path (covers the write case and the trivial read case).
+    if (calls.length === 1) {
+      yield* this.executeTool(calls[0]!, abortSignal);
+      return;
+    }
+
+    // Concurrent path — run up to maxParallelTools at a time, collect events in
+    // completion order but surface them as they arrive.
+    const maxPar = this.config.maxParallelTools ?? 10;
+    const queues: AgentEvent[][] = calls.map(() => []);
+    const done: boolean[] = calls.map(() => false);
+
+    // Start each tool's generator; each one drains into its own queue.
+    const runners = calls.map(async (call, i) => {
+      for await (const ev of this.executeTool(call, abortSignal)) {
+        queues[i]!.push(ev);
+      }
+      done[i] = true;
+    });
+
+    // Rate-limit: only maxPar active at a time. For simplicity, just start them
+    // all (maxPar is usually >= typical fan-out). If callers truly need strict
+    // limiting we can switch to a p-limit style pool later.
+    void maxPar;
+
+    // Drain loop: flush any queued events, yield; poll until all done.
+    while (done.some(d => !d) || queues.some(q => q.length > 0)) {
+      let emitted = false;
+      for (let i = 0; i < queues.length; i++) {
+        const q = queues[i]!;
+        while (q.length > 0) {
+          yield q.shift()!;
+          emitted = true;
+        }
+      }
+      if (!emitted) {
+        // Wait a tick for runners to make progress.
+        await new Promise(r => setImmediate(r));
+      }
+    }
+
+    await Promise.all(runners);
   }
 
   private async *executeTool(
@@ -123,7 +282,9 @@ export class Agent {
     const tool = this.toolMap.get(call.name);
     if (!tool) {
       const msg = `Error: tool "${call.name}" is not available`;
-      this.history.push({ role: 'tool', toolCallId: call.id, name: call.name, content: msg });
+      const toolMsg: Message = { role: 'tool', toolCallId: call.id, name: call.name, content: msg };
+      this.history.push(toolMsg);
+      this.config.session?.recordMessage(toolMsg);
       return;
     }
 
@@ -132,7 +293,9 @@ export class Agent {
       input = JSON.parse(call.arguments);
     } catch {
       const msg = `Error: invalid JSON arguments: ${call.arguments}`;
-      this.history.push({ role: 'tool', toolCallId: call.id, name: call.name, content: msg });
+      const toolMsg: Message = { role: 'tool', toolCallId: call.id, name: call.name, content: msg };
+      this.history.push(toolMsg);
+      this.config.session?.recordMessage(toolMsg);
       return;
     }
 
@@ -143,18 +306,26 @@ export class Agent {
     );
     if (decision === 'deny') {
       yield { type: 'tool_denied', call, tool };
-      this.history.push({
+      const denyMsg: Message = {
         role: 'tool',
         toolCallId: call.id,
         name: call.name,
         content: 'User denied permission. Do not retry. Ask the user what to do instead.',
-      });
+      };
+      this.history.push(denyMsg);
+      this.config.session?.recordMessage(denyMsg);
       return;
     }
 
     yield { type: 'tool_start', call, tool };
     try {
-      const result = await tool.execute(input, { cwd: this.config.cwd, abortSignal });
+      const ctx = {
+        cwd: this.config.cwd,
+        abortSignal,
+        session: this.config.session,
+        toolCallId: call.id,
+      };
+      const result = await tool.execute(input, ctx);
       yield {
         type: 'tool_result',
         call,
@@ -162,25 +333,68 @@ export class Agent {
         content: result.content,
         isError: !!result.isError,
       };
-      this.history.push({
+      const toolMsg: Message = {
         role: 'tool',
         toolCallId: call.id,
         name: call.name,
         content: result.content,
-      });
+      };
+      this.history.push(toolMsg);
+      this.config.session?.recordMessage(toolMsg);
     } catch (err) {
       const msg = (err as Error).message;
       yield { type: 'tool_result', call, tool, content: msg, isError: true };
-      this.history.push({
+      const toolMsg: Message = {
         role: 'tool',
         toolCallId: call.id,
         name: call.name,
         content: `Error: ${msg}`,
-      });
+      };
+      this.history.push(toolMsg);
+      this.config.session?.recordMessage(toolMsg);
     }
   }
+}
 
-  getHistory(): Message[] {
-    return [...this.history];
+/**
+ * Partition a list of tool calls into serial groups where consecutive read-only
+ * calls are bundled together (to be run in parallel), and any non-read-only
+ * call is a group of its own (to be run serially).
+ *
+ * Read-only is proxied by `needsPermission === 'never'`, which is how our tools
+ * already declare side-effect freedom (FileReadTool, GrepTool, GlobTool, LsTool,
+ * TodoTool). BashTool / FileWriteTool / FileEditTool are 'always' and thus
+ * always serial.
+ */
+export function partitionToolCalls(
+  calls: ToolCall[],
+  toolMap: Map<string, ToolDefinition>,
+): ToolCall[][] {
+  const out: ToolCall[][] = [];
+  let current: ToolCall[] = [];
+  let currentIsReadOnly: boolean | null = null;
+
+  const isReadOnly = (c: ToolCall): boolean => {
+    const t = toolMap.get(c.name);
+    return !!t && t.needsPermission === 'never';
+  };
+
+  for (const call of calls) {
+    const ro = isReadOnly(call);
+    if (current.length === 0) {
+      current.push(call);
+      currentIsReadOnly = ro;
+      continue;
+    }
+    // Keep grouping only if both ro and same parity; write calls never group.
+    if (ro && currentIsReadOnly) {
+      current.push(call);
+    } else {
+      out.push(current);
+      current = [call];
+      currentIsReadOnly = ro;
+    }
   }
+  if (current.length > 0) out.push(current);
+  return out;
 }

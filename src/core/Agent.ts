@@ -32,6 +32,13 @@ export interface AgentConfig {
   initialHistory?: Message[];
   /** Max parallel read-only tool calls per partition. Default 10. */
   maxParallelTools?: number;
+  /**
+   * Optional per-turn system-prompt augmenter. Called with the raw user input
+   * right before a turn is sent, so late-binding context (matched skills, RAG
+   * snippets, recalled memory) can be injected without rebuilding the base
+   * prompt. Return null to skip augmentation.
+   */
+  systemPromptAugmenter?: (userInput: string) => string | null;
 }
 
 /**
@@ -92,6 +99,11 @@ export class Agent {
     return this.config.systemPrompt;
   }
 
+  /** Install/replace a per-turn augmenter (skills, memory, RAG). null to clear. */
+  setSystemPromptAugmenter(fn: ((userInput: string) => string | null) | null): void {
+    this.config.systemPromptAugmenter = fn ?? undefined;
+  }
+
   /** Erase in-memory history. Does NOT touch the persisted session log —
    *  callers that want a fresh session must create a new Session object. */
   clearHistory(): void {
@@ -139,6 +151,13 @@ export class Agent {
     this.history.push(userMsg);
     this.config.session?.recordMessage(userMsg);
 
+    // Late-bind system prompt for this run: lets caller inject skills / memory
+    // that depend on the user's current message.
+    const augment = this.config.systemPromptAugmenter?.(userInput);
+    const effectiveSystemPrompt = augment
+      ? `${this.config.systemPrompt}\n\n${augment}`
+      : this.config.systemPrompt;
+
     const maxTurns = this.config.maxTurns ?? 50;
 
     for (let turn = 0; turn < maxTurns; turn++) {
@@ -156,7 +175,7 @@ export class Agent {
       const stream = this.provider.stream({
         messages: this.history,
         tools: this.config.tools,
-        systemPrompt: this.config.systemPrompt,
+        systemPrompt: effectiveSystemPrompt,
         abortSignal,
       });
 

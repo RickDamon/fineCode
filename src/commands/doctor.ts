@@ -6,7 +6,8 @@
  */
 
 import fs from 'node:fs';
-import { readConfig, CONFIG_FILE, inferApiKeyFromEnv } from '../config/Config.js';
+import { readConfig, inferApiKeyFromEnv } from '../config/Config.js';
+import { configFile } from '../config/paths.js';
 import { listModels } from '../providers/models.js';
 
 type Status = 'PASS' | 'WARN' | 'FAIL';
@@ -62,25 +63,26 @@ function checkNode(): CheckResult {
 }
 
 function checkConfigFile(): CheckResult {
-  if (!fs.existsSync(CONFIG_FILE)) {
+  const file = configFile();
+  if (!fs.existsSync(file)) {
     return {
       status: 'WARN',
       label: 'Config file',
-      detail: `Not found. Run \`fine init\` to create one (${CONFIG_FILE}).`,
+      detail: `Not found. Run \`fine init\` to create one (${file}).`,
     };
   }
   // Check permissions: should be 0600 on POSIX; we only warn if it's world-readable.
   try {
-    const stat = fs.statSync(CONFIG_FILE);
+    const stat = fs.statSync(file);
     const mode = stat.mode & 0o777;
     if (process.platform !== 'win32' && mode & 0o044) {
       return {
         status: 'WARN',
         label: 'Config file',
-        detail: `Found at ${CONFIG_FILE} but mode is ${mode.toString(8)} (others can read it). Run: chmod 600 ${CONFIG_FILE}`,
+        detail: `Found at ${file} but mode is ${mode.toString(8)} (others can read it). Run: chmod 600 ${file}`,
       };
     }
-    return { status: 'PASS', label: `Config file (${CONFIG_FILE})` };
+    return { status: 'PASS', label: `Config file (${file})` };
   } catch (e) {
     return {
       status: 'FAIL',

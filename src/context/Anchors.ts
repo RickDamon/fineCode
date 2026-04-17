@@ -18,9 +18,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import { readConfig } from '../config/Config.js';
+import { anchorsFile } from '../config/paths.js';
 
 export interface Anchor {
   id: string;
@@ -28,7 +28,7 @@ export interface Anchor {
   addedAt: number;
 }
 
-const ANCHORS_FILE = path.join(os.homedir(), '.fineCode', 'anchors.json');
+const ANCHORS_FILE = anchorsFile;
 
 /**
  * Anchors are stored globally (not per-session) for now: they typically
@@ -39,8 +39,9 @@ const ANCHORS_FILE = path.join(os.homedir(), '.fineCode', 'anchors.json');
  */
 function loadAnchors(): Record<string, Anchor> {
   try {
-    if (!fs.existsSync(ANCHORS_FILE)) return {};
-    const raw = fs.readFileSync(ANCHORS_FILE, 'utf8');
+    const file = ANCHORS_FILE();
+    if (!fs.existsSync(file)) return {};
+    const raw = fs.readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') return parsed as Record<string, Anchor>;
   } catch {
@@ -50,11 +51,12 @@ function loadAnchors(): Record<string, Anchor> {
 }
 
 function saveAnchors(map: Record<string, Anchor>): void {
-  const dir = path.dirname(ANCHORS_FILE);
+  const file = ANCHORS_FILE();
+  const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = ANCHORS_FILE + '.tmp';
+  const tmp = file + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(map, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, ANCHORS_FILE);
+  fs.renameSync(tmp, file);
 }
 
 export function listAnchors(): Anchor[] {

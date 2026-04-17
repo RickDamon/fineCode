@@ -8,7 +8,8 @@
  *   mode ourselves for every prompt, which guarantees consistent behavior.
  */
 
-import { writeConfig, readConfig, CONFIG_FILE, type StoredConfig } from '../config/Config.js';
+import { writeConfig, readConfig, type StoredConfig } from '../config/Config.js';
+import { configFile } from '../config/paths.js';
 import { listModels } from '../providers/models.js';
 
 // Presets kept local to avoid a circular import with factory.ts.
@@ -158,7 +159,7 @@ export async function runInit(): Promise<void> {
 
   console.log('');
   console.log('fineCode · interactive setup');
-  console.log(`Config file: ${CONFIG_FILE}`);
+  console.log(`Config file: ${configFile()}`);
   console.log('Press Ctrl+C anytime to abort. Existing values will be used as defaults.');
   console.log('');
 
@@ -261,6 +262,6 @@ export async function runInit(): Promise<void> {
 
   writeConfig(patch);
   console.log('');
-  console.log(`Saved to ${CONFIG_FILE} (mode 0600).`);
+  console.log(`Saved to ${configFile()} (mode 0600).`);
   console.log('You can now run `fine` with no arguments, or `fine doctor` to verify.');
 }

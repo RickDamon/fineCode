@@ -1,19 +1,19 @@
 /**
  * Config system for fineCode.
  *
- * Storage: ~/.fineCode/config.json
+ * Storage: ~/.fineCode/config.json (or ~/.fineCode/profiles/<name>/config.json
+ * when a non-default profile is active; see config/paths.ts).
  *
  * Resolution priority (high → low):
  *   1. CLI flags  (--model / --api-key / --base-url / --preset / --provider)
  *   2. Environment variables  (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY / ...)
- *   3. Config file (~/.fineCode/config.json)
+ *   3. Config file
  *
  * The file is created with mode 0600 so the API key is readable only by the owner.
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { configFile, profileRoot } from './paths.js';
 
 export interface StoredConfig {
   /** Default model identifier, e.g. "deepseek-chat", "gpt-4o", "claude-sonnet-4-5". */
@@ -63,16 +63,30 @@ export interface StoredConfig {
    * Added via /anchor <text>. Keyed by short ids for easy removal.
    */
   anchors?: Record<string, { text: string; addedAt: number }>;
+  /**
+   * Auto-distill session into long-term memory on exit (via /exit, Ctrl+C).
+   * Off by default — an extra API call on every quit surprises users.
+   * Users can always run /remember manually.
+   */
+  autoRemember?: boolean;
 }
 
-export const CONFIG_DIR = path.join(os.homedir(), '.fineCode');
-export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+/**
+ * @deprecated Prefer `configFile()` / `profileRoot()` from ./paths.js.
+ * These constants are evaluated at MODULE LOAD TIME, before setActiveProfile()
+ * has a chance to run, so they always point at the default profile root.
+ * Kept only as a soft-migration shim; remove once no external code reads them.
+ */
+export const CONFIG_DIR = profileRoot();
+/** @deprecated see CONFIG_DIR */
+export const CONFIG_FILE = configFile();
 
 /** Read the stored config file. Returns `{}` if missing or malformed (never throws). */
 export function readConfig(): StoredConfig {
+  const file = configFile();
   try {
-    if (!fs.existsSync(CONFIG_FILE)) return {};
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+    if (!fs.existsSync(file)) return {};
+    const raw = fs.readFileSync(file, 'utf8');
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') return parsed as StoredConfig;
     return {};
@@ -83,15 +97,17 @@ export function readConfig(): StoredConfig {
 
 /** Write (merge) config to disk. Creates the dir if needed. File mode is 0600. */
 export function writeConfig(patch: Partial<StoredConfig>): StoredConfig {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  const dir = profileRoot();
+  const file = configFile();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   const current = readConfig();
   const next: StoredConfig = { ...current, ...patch };
   // Write atomically: write tmp then rename.
-  const tmp = CONFIG_FILE + '.tmp';
+  const tmp = file + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, CONFIG_FILE);
+  fs.renameSync(tmp, file);
   return next;
 }
 
@@ -145,7 +161,7 @@ export interface ResolvedConfig {
 
 export function resolveConfig(flags: Partial<StoredConfig>): ResolvedConfig {
   const stored = readConfig();
-  const fromFile = fs.existsSync(CONFIG_FILE);
+  const fromFile = fs.existsSync(configFile());
 
   const model = flags.model ?? stored.model;
   const preset = flags.preset ?? stored.preset;

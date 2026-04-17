@@ -10,9 +10,11 @@ import { createProvider, PRESETS } from './providers/factory.js';
 import { PermissionManager } from './permission/PermissionManager.js';
 import { buildSystemPrompt } from './context/SystemPrompt.js';
 import { applyMode } from './context/WorkflowModes.js';
+import { matchSkills, skillsSystemBlock } from './context/Skills.js';
 import { DEFAULT_TOOLS } from './tools/index.js';
 import { REPL } from './ui/REPL.js';
-import { resolveConfig, CONFIG_FILE } from './config/Config.js';
+import { resolveConfig } from './config/Config.js';
+import { setActiveProfile, getActiveProfile, listProfileNames, configFile } from './config/paths.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
 import { runMcpServer } from './commands/mcpServer.js';
@@ -48,7 +50,45 @@ function readPkgVersion(): string {
   return '0.0.0';
 }
 
+/**
+ * Pull --profile / -P / --profile=X out of process.argv BEFORE commander
+ * parses. This lets every downstream module (Config, Session, Anchors, ...)
+ * read path-resolving functions that already point at the right profile root.
+ */
+function extractProfileFlag(): void {
+  const argv = process.argv;
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--profile' || a === '-P') {
+      const name = argv[i + 1];
+      if (name && !name.startsWith('-')) {
+        setActiveProfile(name);
+        argv.splice(i, 2);
+        return;
+      }
+    } else if (a.startsWith('--profile=')) {
+      const name = a.slice('--profile='.length);
+      if (name) setActiveProfile(name);
+      argv.splice(i, 1);
+      return;
+    } else if (a.startsWith('-P') && a.length > 2) {
+      const name = a.slice(2);
+      if (name) setActiveProfile(name);
+      argv.splice(i, 1);
+      return;
+    }
+  }
+  // Fall back to FINE_PROFILE env var for persistent shell setups.
+  if (process.env.FINE_PROFILE) {
+    setActiveProfile(process.env.FINE_PROFILE);
+  }
+}
+
 async function main() {
+  // --- Extract --profile / --P globally BEFORE commander parses, so every
+  //     subcommand & path-resolving module sees the right root from the start.
+  extractProfileFlag();
+
   const program = new Command();
   const version = readPkgVersion();
 
@@ -56,6 +96,14 @@ async function main() {
     .name('fine')
     .description('A minimal, model-agnostic coding agent inspired by Claude Code')
     .version(version, '-v, --version', 'output the current version');
+
+  // Declare --profile on the root so `--help` documents it. It's already
+  // stripped from argv by extractProfileFlag() so commander just sees it as
+  // an acknowledged-but-unused global.
+  program.option(
+    '-P, --profile <name>',
+    'Use a named profile (isolated config / sessions / anchors / skills)',
+  );
 
   // --- Subcommands ---
   program
@@ -68,9 +116,9 @@ async function main() {
 
   program
     .command('config')
-    .description(`Print the current config file path (${CONFIG_FILE})`)
+    .description('Print the current config file path')
     .action(() => {
-      console.log(CONFIG_FILE);
+      console.log(configFile());
       process.exit(0);
     });
 
@@ -87,6 +135,24 @@ async function main() {
     .action(async () => {
       await runMcpServer(version);
       // Don't exit — the server lives until stdin closes.
+    });
+
+  program
+    .command('profiles')
+    .description('List named profiles (isolated config / sessions / anchors / skills)')
+    .action(() => {
+      const active = getActiveProfile();
+      const names = listProfileNames();
+      console.log(`Active profile: ${active ?? 'default'}`);
+      console.log('');
+      console.log('Available profiles:');
+      console.log('  default');
+      for (const n of names) console.log(`  ${n}`);
+      console.log('');
+      console.log('Usage:');
+      console.log('  fine --profile work           one-shot');
+      console.log('  export FINE_PROFILE=work      session-wide');
+      process.exit(0);
     });
 
   program
@@ -254,6 +320,13 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     initialHistory,
   });
 
+  // Install the skill augmenter: every turn, match the user's message against
+  // saved skills by trigger and splice the matched bodies into the prompt.
+  agent.setSystemPromptAugmenter(userInput => {
+    const matched = matchSkills(userInput);
+    return skillsSystemBlock(matched);
+  });
+
   // --- Connect MCP servers (if any) and register their tools ---
   const stored = readConfig();
   let mcpRecords: MCPServerRecord[] = [];
@@ -292,10 +365,36 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
       modelName: provider.name,
       session,
       setSession,
+      profile: getActiveProfile(),
       onPermissionRequest: registerHandler,
     }),
   );
   await waitUntilExit();
+
+  // Optional: distill this session into long-term memory before shutting down.
+  // Guarded by config.autoRemember so it doesn't surprise new users with an
+  // extra API call at exit.
+  if (stored.autoRemember) {
+    try {
+      const { distillSession } = await import('./config/Memory.js');
+      const entry = await Promise.race([
+        distillSession(agent.getHistory(), {
+          model: provider.model,
+          cwd,
+          sessionId: session.id,
+        }),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), 10_000)),
+      ]);
+      if (entry) {
+        process.stderr.write(
+          `Remembered ${entry.facts.length} fact(s) from this session (/memory list to review).\n`,
+        );
+      }
+    } catch {
+      /* ignore — distillation is best-effort */
+    }
+  }
+
   session.close();
   if (mcpRecords.length > 0) await disconnectMCPServers(mcpRecords);
 }

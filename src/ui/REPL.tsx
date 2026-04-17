@@ -40,15 +40,24 @@ interface Props {
   /** Must be passed by the caller (Session + setter so /clear can swap it). */
   session: Session;
   setSession: (s: Session) => void;
+  /** Active profile name; shown in the banner when non-default. */
+  profile?: string | null;
   onPermissionRequest: (register: (req: PermissionRequest) => void) => void;
 }
 
-export function REPL({ agent, modelName, session, setSession, onPermissionRequest }: Props) {
+export function REPL({ agent, modelName, session, setSession, profile, onPermissionRequest }: Props) {
   const { exit } = useApp();
+  const bannerPieces = [
+    `fine · model: ${modelName}`,
+    profile ? `profile: ${profile}` : null,
+    `session: ${session.id}`,
+    '/help for commands',
+    'Ctrl+C to exit',
+  ].filter(Boolean);
   const [items, setItems] = useState<DisplayItem[]>([
     {
       kind: 'info',
-      text: `fine · model: ${modelName} · session: ${session.id} · /help for commands · Ctrl+C to exit`,
+      text: bannerPieces.join(' · '),
     },
   ]);
   const [input, setInput] = useState('');

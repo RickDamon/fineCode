@@ -1,8 +1,10 @@
-import { platform, hostname, userInfo, homedir } from 'node:os';
+import { platform, hostname, userInfo } from 'node:os';
 import { promises as fs } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { anchorsSystemBlock } from './Anchors.js';
+import { userFineMd } from '../config/paths.js';
+import { recallForCwd, memorySystemBlock } from '../config/Memory.js';
 
 /**
  * Build a dynamic system prompt with environment context.
@@ -30,10 +32,7 @@ export async function buildSystemPrompt(cwd: string): Promise<string> {
 
   const sections = [CORE_PROMPT, `# Environment\n${envLines.join('\n')}`];
 
-  const userRules = await readFirstExisting([
-    join(homedir(), '.fineCode', 'FINE.md'),
-    join(homedir(), '.fineCode', 'CLAUDE.md'),
-  ]);
+  const userRules = await readFirstExisting(userFineMd());
   if (userRules) sections.push(`# User rules\n${userRules.trim()}`);
 
   const projectRules = await readProjectRules(cwd);
@@ -41,6 +40,9 @@ export async function buildSystemPrompt(cwd: string): Promise<string> {
 
   const anchors = anchorsSystemBlock();
   if (anchors) sections.push(anchors);
+
+  const memories = memorySystemBlock(recallForCwd(cwd, 5));
+  if (memories) sections.push(memories);
 
   return sections.join('\n\n') + '\n';
 }

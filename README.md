@@ -20,6 +20,9 @@
 - 💰 **Token & 成本追踪** — 状态栏实时显示 `24.5k tokens (37%) · $0.024`
 - 📎 **上下文锚** — `/anchor` 钉住"别忘了"的指令，跨 compact 永不丢
 - 🗜️ **两层压缩** — 大工具结果自动 micro-compact；历史逼近窗口自动 summarize
+- 🎓 **Skill 复用** — `/skill save` 把做过的事固化成 SKILL.md，下次关键词匹配时自动注入
+- 🧠 **长期记忆** — session 结束时可自动抽取 key facts，下次在同目录打开时作为 user context 注入
+- 👥 **Profile 多实例** — `--profile work` / `--profile side`，各自独立的 config / sessions / anchors / skills / memory
 
 ### 多模型协作
 - 🤖 **Subagent 系统** — 让父 agent 调 `spawn_agent` 起子 agent 干脏活：research 用便宜模型、edit 用强模型、review 用第三个模型
@@ -37,7 +40,10 @@
 ## 安装
 
 ```bash
-# 全局安装（推荐）
+# 一键脚本（推荐，自动装 Node）
+curl -fsSL https://raw.githubusercontent.com/RickDamon/fineCode/main/scripts/install.sh | bash
+
+# 或者全局装 npm 包
 npm install -g fine-code
 
 # 或者本地开发
@@ -133,11 +139,13 @@ fine -m gpt-4o --bypass
 | `fine` | 启动 REPL（使用配置文件 / env / flag 解析出的参数） |
 | `fine -c` | 继续当前目录最近一次会话 |
 | `fine --resume <id>` | 恢复指定 id 的会话（用 `fine sessions` 查 id） |
+| `fine -P <name>` / `--profile <name>` | 使用指定 profile（独立 config/sessions/anchors/skills/memory） |
 | `fine sessions` | 列出最近的会话 |
+| `fine profiles` | 列出所有已创建的 profile |
 | `fine init` | 交互式配置向导；能联网时自动拉取 `/v1/models` 供你选择 |
 | `fine doctor` | 诊断环境与配置（Node / 配置 / 网络 / API key / 模型） |
 | `fine mcp-server` | 作为 MCP server 运行（供 Claude Desktop / IDE 等调用） |
-| `fine config` | 打印配置文件路径 |
+| `fine config` | 打印当前 profile 的配置文件路径 |
 
 ## REPL 内斜杠命令
 
@@ -154,10 +162,12 @@ fine -m gpt-4o --bypass
 | `/diff [pathFilter]` | 展示本次会话对文件的改动（基于 snapshot） |
 | `/rewind` | 回滚本次会话中所有被 AI 改过的文件 |
 | `/anchor <text>` | 钉一条"永不忘记"的指令（跨 compact 存活） |
-| `/anchors` | 列出当前锚 |
-| `/unanchor <id>` / `/unanchor all` | 移除锚 |
-| `/mode [none\|ddd\|tdd\|sdd]` | 切换 workflow 模式 |
-| `/ddd` `/tdd` `/sdd` | 模式快捷键 |
+| `/anchors` / `/unanchor <id\|all>` | 列出 / 删锚 |
+| `/skill save [name]` | 让模型把当前会话精华固化成 SKILL.md |
+| `/skill list` / `/skill delete <name>` | 管理 skills |
+| `/remember` | 把本次会话抽取 key facts 写入长期记忆 |
+| `/memory list` / `/memory recall` / `/memory forget <id\|all>` | 管理长期记忆 |
+| `/mode [none\|ddd\|tdd\|sdd]` / `/ddd` `/tdd` `/sdd` | 切换 workflow 模式 |
 | `/exit` | 退出 |
 
 ## Subagent 系统
@@ -222,6 +232,78 @@ fine -m gpt-4o --bypass
 ```
 
 **和 FINE.md 的区别**：FINE.md 是项目级规则（放在 repo 里 commit），anchors 是跨项目、跨会话的用户级 pinned context，存在 `~/.fineCode/anchors.json`，**auto-compact 永远不会吞掉它**。
+
+## Skill 系统
+
+AI 帮你做过一遍的事情，可以"固化"成复用的 SKILL.md：
+
+```
+❯ 帮我通过 rsync 部署到生产服务器
+…（AI 完成一堆步骤）…
+
+❯ /skill save
+✓ Saved skill: deploy-via-rsync
+  triggers: deploy, rsync, production
+  file: ~/.fineCode/skills/deploy-via-rsync.md
+```
+
+下次你说"帮我 deploy 一下"时，**因为 trigger 匹配**，这条 skill 会自动被拼进 system prompt，AI 会按上次的步骤来。
+
+- `/skill list` — 看所有 skill
+- `/skill save [name]` — 蒸馏当前会话
+- `/skill delete <name>` — 删一个
+- Skill 文件是普通 Markdown，可以手动编辑或 commit 到项目 repo 里共享
+
+和 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的 skill 概念相似，格式简化。
+
+## 长期记忆
+
+`/remember` 把本次会话蒸馏成"我在这个项目里学到的事实"，存进 `~/.fineCode/memory.json`。下次你在**同一目录**打开 fineCode 时，recall 会自动匹配并注入到 system prompt 里：
+
+```
+❯ /remember
+✓ Saved 4 fact(s) [a3f2c1]:
+  • 这个项目用 pnpm 而不是 npm
+  • 所有 API route 在 src/app/api/
+  • 测试用 vitest，不是 jest
+  • 已决定使用 Zod 做运行时校验
+```
+
+下次启动会看到：
+```
+# User context (recalled from past sessions in this directory)
+...
+```
+
+设置 `config.json` 里 `"autoRemember": true` 可以在**退出时自动**触发一次（会加一次 API 调用，默认关闭）。
+
+- `/memory list` — 看所有记忆条目
+- `/memory recall` — 看当前目录会被 recall 的
+- `/memory forget <id>` — 删一条，`/memory forget all` 清空
+
+## Profile 多实例
+
+想要"工作用 agent"和"副业用 agent"分开？用 profile：
+
+```bash
+fine --profile work           # 专用工作 profile
+fine --profile side           # 副业
+fine -P study --model gpt-4o  # 短参数也行
+
+export FINE_PROFILE=work      # 一整个 shell 都走 work
+fine                          # 自动用 work
+
+fine profiles                 # 看所有 profile
+```
+
+每个 profile 独立：
+- `~/.fineCode/profiles/<name>/config.json`（不同的 model / key）
+- `~/.fineCode/profiles/<name>/sessions/`（对话历史分开）
+- `~/.fineCode/profiles/<name>/anchors.json`（各自 pinned）
+- `~/.fineCode/profiles/<name>/skills/`（各自的 skill 库）
+- `~/.fineCode/profiles/<name>/memory.json`（各自的长期记忆）
+
+不指定 `--profile` 就用默认 profile，路径是 `~/.fineCode/...`。
 
 ## 会话持久化 / Diff / Rewind
 

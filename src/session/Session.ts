@@ -20,11 +20,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import type { Message, Usage } from '../core/types.js';
+import { sessionsDir } from '../config/paths.js';
 
-export const SESSIONS_DIR = path.join(os.homedir(), '.fineCode', 'sessions');
+/** Back-compat shim: prefer calling `sessionsDir()` directly. */
+export const SESSIONS_DIR = sessionsDir();
 
 export interface SessionMeta {
   id: string;
@@ -84,16 +85,17 @@ export class Session {
   private snapshots: SnapshotRecord[] = [];
 
   private constructor(id: string, meta: SessionMeta) {
+    const dir = sessionsDir();
     this.id = id;
-    this.logPath = path.join(SESSIONS_DIR, `${id}.jsonl`);
-    this.metaPath = path.join(SESSIONS_DIR, `${id}.meta.json`);
-    this.snapshotDir = path.join(SESSIONS_DIR, `${id}.snapshots`);
+    this.logPath = path.join(dir, `${id}.jsonl`);
+    this.metaPath = path.join(dir, `${id}.meta.json`);
+    this.snapshotDir = path.join(dir, `${id}.snapshots`);
     this.meta = meta;
   }
 
   /** Create a fresh session. */
   static create(opts: { cwd: string; model: string }): Session {
-    ensureDir(SESSIONS_DIR);
+    ensureDir(sessionsDir());
     const id = newId();
     const meta: SessionMeta = {
       id,
@@ -113,8 +115,9 @@ export class Session {
 
   /** Load an existing session by id. Returns null if not found. */
   static load(id: string): { session: Session; messages: Message[] } | null {
-    const metaPath = path.join(SESSIONS_DIR, `${id}.meta.json`);
-    const logPath = path.join(SESSIONS_DIR, `${id}.jsonl`);
+    const dir = sessionsDir();
+    const metaPath = path.join(dir, `${id}.meta.json`);
+    const logPath = path.join(dir, `${id}.jsonl`);
     if (!fs.existsSync(metaPath) || !fs.existsSync(logPath)) return null;
 
     let meta: SessionMeta;
@@ -130,14 +133,15 @@ export class Session {
 
   /** List recent sessions, newest first. */
   static list(limit = 20): SessionMeta[] {
-    if (!fs.existsSync(SESSIONS_DIR)) return [];
+    const dir = sessionsDir();
+    if (!fs.existsSync(dir)) return [];
     const files = fs
-      .readdirSync(SESSIONS_DIR)
+      .readdirSync(dir)
       .filter(f => f.endsWith('.meta.json'));
     const metas: SessionMeta[] = [];
     for (const f of files) {
       try {
-        const j = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
+        const j = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
         if (j && typeof j === 'object' && j.id) metas.push(j as SessionMeta);
       } catch {
         /* ignore malformed meta */
@@ -192,7 +196,7 @@ export class Session {
 
   private openLog(): fs.WriteStream {
     if (!this.logStream) {
-      ensureDir(SESSIONS_DIR);
+      ensureDir(sessionsDir());
       this.logStream = fs.createWriteStream(this.logPath, { flags: 'a', mode: 0o600 });
     }
     return this.logStream;

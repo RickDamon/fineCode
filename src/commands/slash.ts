@@ -20,6 +20,14 @@ import { compactHistory } from './compact.js';
 import { applyMode, MODE_DESCRIPTIONS, type WorkflowMode } from '../context/WorkflowModes.js';
 import { buildSystemPrompt } from '../context/SystemPrompt.js';
 import { addAnchor, listAnchors, removeAnchor } from '../context/Anchors.js';
+import { listSkills, deleteSkill } from '../context/Skills.js';
+import { distillSkill } from './skillDistill.js';
+import {
+  listMemories,
+  removeMemoryEntry,
+  distillSession,
+  recallForCwd,
+} from '../config/Memory.js';
 import { unifiedDiff } from '../utils/diff.js';
 
 export interface SlashContext {
@@ -355,6 +363,128 @@ const COMMANDS: SlashCommand[] = [
       if (!ok) return { lines: [`No anchor with id "${id}".`], level: 'error' };
       await rebuildSystemPrompt(ctx);
       return { lines: [id === 'all' ? 'All anchors cleared.' : `Removed [${id}].`], level: 'ok' };
+    },
+  },
+  {
+    name: 'skill',
+    description: 'Manage skills: /skill save [name] | /skill list | /skill delete <name>',
+    run: async (args, ctx) => {
+      const [sub, ...rest] = args.trim().split(/\s+/);
+      const arg = rest.join(' ').trim();
+      if (!sub || sub === 'list') {
+        const all = listSkills();
+        if (all.length === 0) return { lines: ['No skills saved yet. Use `/skill save`.'], level: 'info' };
+        return {
+          lines: [
+            'Saved skills:',
+            ...all.map(
+              s =>
+                `  ${s.name}${s.title ? ` — ${s.title}` : ''}${s.triggers.length ? ` [triggers: ${s.triggers.join(', ')}]` : ''}`,
+            ),
+          ],
+          level: 'info',
+        };
+      }
+      if (sub === 'save') {
+        try {
+          const meta = ctx.session.getMeta();
+          const sk = await distillSkill(ctx.agent.getHistory(), { model: meta.model, name: arg || undefined });
+          await rebuildSystemPrompt(ctx);
+          return {
+            lines: [
+              `Saved skill: ${sk.name}`,
+              `  title:    ${sk.title ?? '(none)'}`,
+              `  triggers: ${sk.triggers.join(', ') || '(none)'}`,
+              `  file:     ${sk.filePath}`,
+            ],
+            level: 'ok',
+          };
+        } catch (e) {
+          return { lines: [`/skill save failed: ${(e as Error).message}`], level: 'error' };
+        }
+      }
+      if (sub === 'delete') {
+        if (!arg) return { lines: ['Usage: /skill delete <name>'], level: 'error' };
+        const ok = deleteSkill(arg);
+        await rebuildSystemPrompt(ctx);
+        return { lines: [ok ? `Deleted skill "${arg}".` : `No skill named "${arg}".`], level: ok ? 'ok' : 'error' };
+      }
+      return { lines: [`Unknown subcommand: ${sub}`, 'Usage: /skill [save|list|delete] [name]'], level: 'error' };
+    },
+  },
+  {
+    name: 'remember',
+    description: 'Distill the current session into long-term memory (facts, not full transcript)',
+    run: async (_args, ctx) => {
+      const meta = ctx.session.getMeta();
+      try {
+        const entry = await distillSession(ctx.agent.getHistory(), {
+          model: meta.model,
+          cwd: meta.cwd,
+          sessionId: ctx.session.id,
+        });
+        if (!entry) {
+          return { lines: ['Nothing durable to remember from this session.'], level: 'info' };
+        }
+        await rebuildSystemPrompt(ctx);
+        return {
+          lines: [
+            `Saved ${entry.facts.length} fact(s) [${entry.id}]:`,
+            ...entry.facts.map(f => `  • ${f}`),
+            '',
+            'They will be recalled next time you work in this directory.',
+          ],
+          level: 'ok',
+        };
+      } catch (e) {
+        return { lines: [`Remember failed: ${(e as Error).message}`], level: 'error' };
+      }
+    },
+  },
+  {
+    name: 'memory',
+    description: 'Manage long-term memory: /memory list | /memory forget <id> | /memory recall',
+    run: async (args, ctx) => {
+      const [sub, ...rest] = args.trim().split(/\s+/);
+      const arg = rest.join(' ').trim();
+      if (!sub || sub === 'list') {
+        const all = listMemories();
+        if (all.length === 0) return { lines: ['No memory entries yet.'], level: 'info' };
+        return {
+          lines: [
+            `Memory entries (${all.length} total, newest first):`,
+            ...all.slice(0, 30).flatMap(e => {
+              const age = Math.floor((Date.now() - e.addedAt) / (24 * 60 * 60 * 1000));
+              return [
+                `[${e.id}] ${e.cwd} (${age}d ago)`,
+                ...e.facts.map(f => `    • ${f}`),
+              ];
+            }),
+          ],
+          level: 'info',
+        };
+      }
+      if (sub === 'recall') {
+        const hits = recallForCwd(ctx.session.getMeta().cwd);
+        if (hits.length === 0) return { lines: ['No memories match this cwd.'], level: 'info' };
+        return {
+          lines: [
+            `Recalled for ${ctx.session.getMeta().cwd}:`,
+            ...hits.flatMap(e => [
+              `[${e.id}]`,
+              ...e.facts.map(f => `  • ${f}`),
+            ]),
+          ],
+          level: 'info',
+        };
+      }
+      if (sub === 'forget') {
+        if (!arg) return { lines: ['Usage: /memory forget <id>  OR  /memory forget all'], level: 'error' };
+        const ok = removeMemoryEntry(arg);
+        await rebuildSystemPrompt(ctx);
+        return { lines: [ok ? `Forgot "${arg}".` : `No memory with id "${arg}".`], level: ok ? 'ok' : 'error' };
+      }
+      return { lines: [`Unknown subcommand: ${sub}`], level: 'error' };
     },
   },
   {

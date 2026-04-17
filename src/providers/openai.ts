@@ -7,6 +7,7 @@ import type {
   StreamEvent,
   ToolDefinition,
 } from '../core/types.js';
+import { wrapOpenAIError } from '../core/ProviderError.js';
 
 /**
  * OpenAI-compatible provider.
@@ -17,10 +18,12 @@ export class OpenAIProvider implements Provider {
   readonly name: string;
   readonly model: string;
   private client: OpenAI;
+  private baseUrl?: string;
 
   constructor(config: ProviderConfig) {
     this.model = config.model;
     this.name = `openai:${config.model}`;
+    this.baseUrl = config.baseUrl;
     this.client = new OpenAI({
       apiKey: config.apiKey ?? 'no-key-required',
       baseURL: config.baseUrl,
@@ -101,7 +104,14 @@ export class OpenAIProvider implements Provider {
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
-      yield { type: 'error', error: err as Error };
+      yield {
+        type: 'error',
+        error: wrapOpenAIError(err, {
+          providerLabel: 'openai',
+          model: this.model,
+          baseUrl: this.baseUrl,
+        }),
+      };
     }
   }
 

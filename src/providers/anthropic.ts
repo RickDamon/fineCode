@@ -1,5 +1,6 @@
 import type { Provider, ProviderConfig } from '../core/Provider.js';
 import type { Message, QueryOptions, StreamEvent, ToolDefinition } from '../core/types.js';
+import { wrapHttpError, wrapGenericError } from '../core/ProviderError.js';
 
 /**
  * Anthropic Claude provider — direct API, not via @anthropic-ai/sdk.
@@ -46,15 +47,26 @@ export class AnthropicProvider implements Provider {
       });
 
       if (!resp.ok || !resp.body) {
-        const txt = await resp.text().catch(() => '');
-        yield { type: 'error', error: new Error(`Anthropic API ${resp.status}: ${txt}`) };
+        const errorCtx = {
+          providerLabel: 'anthropic',
+          model: this.model,
+          baseUrl: this.baseUrl,
+        };
+        yield { type: 'error', error: await wrapHttpError(resp, errorCtx) };
         return;
       }
 
       yield* this.parseSSE(resp.body);
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
-      yield { type: 'error', error: err as Error };
+      yield {
+        type: 'error',
+        error: wrapGenericError(err, {
+          providerLabel: 'anthropic',
+          model: this.model,
+          baseUrl: this.baseUrl,
+        }),
+      };
     }
   }
 

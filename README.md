@@ -18,58 +18,126 @@
 ## 安装
 
 ```bash
-cd harness
+# 全局安装（推荐）
+npm install -g fine-code
+
+# 或者本地开发
+git clone <repo>
+cd fineCode
 npm install
+npm run build
 ```
 
-## 使用
+> 要求 Node.js >= 18。
 
-### 最简启动
+## 快速开始
+
+```bash
+# 1) 首次使用先交互式配置
+fine init
+
+# 2) 以后直接启动，无需参数
+fine
+```
+
+`fine init` 会引导你选择 preset（openai / deepseek / moonshot / openrouter / groq / together / ollama）、填入模型名和 API key，并保存到 `~/.fineCode/config.json`（文件权限 0600，仅所有者可读）。
+
+## 配置优先级
+
+运行时参数按下面的优先级合并（高优先级覆盖低优先级）：
+
+1. **命令行 flag** — `--model` / `--api-key` / `--base-url` / `--preset` / `--provider` / `--bypass`
+2. **环境变量** — `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `MOONSHOT_API_KEY` / `OPENROUTER_API_KEY` / `GROQ_API_KEY` / `TOGETHER_API_KEY`
+3. **配置文件** — `~/.fineCode/config.json`（可用 `fine config` 打印路径）
+
+## 使用示例
+
+### 用配置文件（推荐）
+
+```bash
+fine init          # 一次性设置
+fine               # 以后直接用
+```
+
+### 用 CLI 参数（临时覆盖）
 
 ```bash
 # OpenAI
-npx tsx src/cli.tsx --model gpt-4o --api-key sk-xxx
+fine --model gpt-4o --api-key sk-xxx
 
 # Claude
-npx tsx src/cli.tsx --model claude-sonnet-4-5-20250929 --api-key sk-ant-xxx
+fine --model claude-sonnet-4-5-20250929 --api-key sk-ant-xxx
 
 # DeepSeek
-npx tsx src/cli.tsx --model deepseek-chat --preset deepseek --api-key xxx
+fine --model deepseek-chat --preset deepseek --api-key xxx
 
 # Ollama 本地模型（无需 key）
-npx tsx src/cli.tsx --model qwen2.5-coder:7b --preset ollama
+fine --model qwen2.5-coder:7b --preset ollama
 
 # OpenRouter
-npx tsx src/cli.tsx --model anthropic/claude-sonnet-4 --preset openrouter --api-key sk-or-xxx
+fine --model anthropic/claude-sonnet-4 --preset openrouter --api-key sk-or-xxx
 ```
 
 ### 使用环境变量
 
 ```bash
 export OPENAI_API_KEY=sk-xxx
-npx tsx src/cli.tsx -m gpt-4o
+fine -m gpt-4o
 
 export ANTHROPIC_API_KEY=sk-ant-xxx
-npx tsx src/cli.tsx -m claude-sonnet-4-5-20250929
+fine -m claude-sonnet-4-5-20250929
 
 export DEEPSEEK_API_KEY=xxx
-npx tsx src/cli.tsx -m deepseek-chat -p deepseek
+fine -m deepseek-chat -p deepseek
 ```
 
 ### 自定义端点
 
 ```bash
 # 自建的 OpenAI 兼容服务
-npx tsx src/cli.tsx -m my-model -u http://localhost:8000/v1 -k any-key
+fine -m my-model -u http://localhost:8000/v1 -k any-key
 
 # Azure OpenAI
-npx tsx src/cli.tsx -m gpt-4 -u https://my-resource.openai.azure.com/openai/deployments/my-deployment -k key
+fine -m gpt-4 -u https://my-resource.openai.azure.com/openai/deployments/my-deployment -k key
 ```
 
 ### 危险模式（跳过所有权限）
 
 ```bash
-npx tsx src/cli.tsx -m gpt-4o --bypass
+fine -m gpt-4o --bypass
+```
+
+## 命令
+
+| 命令 | 作用 |
+|------|------|
+| `fine` | 启动 REPL（使用配置文件 / env / flag 解析出的参数） |
+| `fine init` | 交互式配置向导，写入 `~/.fineCode/config.json`；能联网时自动拉取 `/v1/models` 供你选择 |
+| `fine doctor` | 诊断环境与配置：Node 版本 / 配置文件 / 网络连通性 / API key 可用性 / 模型是否受服务端支持 |
+| `fine config` | 打印配置文件路径 |
+| `fine --version` | 查看版本 |
+| `fine --help` | 查看完整帮助 |
+
+## 错误诊断
+
+fineCode 会把常见的 provider API 错误翻译成人话，直接告诉你下一步怎么办：
+
+| 错误类型 | 触发条件 | 建议 |
+|---------|---------|------|
+| `auth` | 401、API key 无效 | 重新 `fine init` 或设置环境变量 |
+| `model` | 400/404、模型名不存在 | 运行 `fine doctor` 看服务端支持的模型 |
+| `rate_limit` | 429 | 稍等重试或换 preset |
+| `quota` | 402、账户欠费 | 去服务商控制台充值 |
+| `network` | 连接被拒 / DNS / 超时 | 检查网络 / VPN / `--base-url` |
+
+如果 REPL 里显示红色 `Error: [4xx] ...` 下面跟着黄色的 `Hint: ...`，按提示操作即可。
+
+## 更新提示
+
+fineCode 每 24 小时在后台检查一次 npm 新版本，发现更新时会在启动时打印一行提示。可以通过以下方式禁用：
+
+```bash
+export NO_UPDATE_NOTIFIER=1   # 或在 CI 环境下自动禁用
 ```
 
 ## 交互体验
@@ -102,7 +170,13 @@ harness · model: openai:gpt-4o · type your question, Ctrl+C to exit
 
 ```
 src/
-├── cli.tsx                    入口：解析 --model / --api-key
+├── cli.tsx                    入口：解析 CLI / 子命令 / 启动 REPL
+├── commands/
+│   └── init.ts                fine init 交互式向导
+├── config/
+│   └── Config.ts              ~/.fineCode/config.json 读写与优先级合并
+├── utils/
+│   └── updateCheck.ts         启动时后台检查 npm 新版本
 ├── core/
 │   ├── types.ts               统一类型（OpenAI 风格为 canonical）
 │   ├── Provider.ts            Provider 接口

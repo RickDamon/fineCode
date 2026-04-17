@@ -4,12 +4,13 @@ import TextInput from 'ink-text-input';
 import Spinner from 'ink-spinner';
 import type { Agent, AgentEvent } from '../core/Agent.js';
 import type { ToolDefinition } from '../core/types.js';
+import { ProviderError } from '../core/ProviderError.js';
 
 type DisplayItem =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; name: string; preview: string; status: 'running' | 'ok' | 'error' | 'denied'; output?: string }
-  | { kind: 'error'; text: string }
+  | { kind: 'error'; text: string; hint?: string }
   | { kind: 'info'; text: string };
 
 interface PermissionRequest {
@@ -141,7 +142,13 @@ export function REPL({ agent, modelName, onPermissionRequest }: Props) {
             return next;
           });
         } else if (event.type === 'error') {
-          setItems(prev => [...prev, { kind: 'error', text: event.error.message }]);
+          const err = event.error;
+          if (err instanceof ProviderError) {
+            const header = err.status ? `[${err.status}] ${err.message}` : err.message;
+            setItems(prev => [...prev, { kind: 'error', text: header, hint: err.hint }]);
+          } else {
+            setItems(prev => [...prev, { kind: 'error', text: err.message }]);
+          }
         }
       }
     } catch (err) {
@@ -227,8 +234,13 @@ function ItemView({ item }: { item: DisplayItem }) {
   }
   if (item.kind === 'error') {
     return (
-      <Box marginTop={1}>
+      <Box flexDirection="column" marginTop={1}>
         <Text color="red">Error: {item.text}</Text>
+        {item.hint && (
+          <Box paddingLeft={2}>
+            <Text color="yellow">{item.hint}</Text>
+          </Box>
+        )}
       </Box>
     );
   }

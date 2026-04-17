@@ -1,4 +1,6 @@
-# harness
+# fineCode
+
+> a code tool designed by harness
 
 一个极简的、模型无关的命令行编码代理 (coding agent)，继承自 Claude Code 的 **"harness 即一切"** 设计哲学。
 

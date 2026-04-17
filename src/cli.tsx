@@ -9,15 +9,18 @@ import { Agent } from './core/Agent.js';
 import { createProvider, PRESETS } from './providers/factory.js';
 import { PermissionManager } from './permission/PermissionManager.js';
 import { buildSystemPrompt } from './context/SystemPrompt.js';
+import { applyMode } from './context/WorkflowModes.js';
 import { DEFAULT_TOOLS } from './tools/index.js';
 import { REPL } from './ui/REPL.js';
 import { resolveConfig, CONFIG_FILE } from './config/Config.js';
 import { runInit } from './commands/init.js';
 import { runDoctor } from './commands/doctor.js';
+import { runMcpServer } from './commands/mcpServer.js';
 import { scheduleUpdateCheck } from './utils/updateCheck.js';
 import { Session } from './session/Session.js';
 import { connectMCPServers, disconnectMCPServers, type MCPServerRecord } from './mcp/McpClient.js';
 import { readConfig } from './config/Config.js';
+import { createSpawnAgentTool } from './tools/SpawnAgentTool.js';
 import type { ToolDefinition, Message } from './core/types.js';
 
 interface PermissionRequest {
@@ -76,6 +79,14 @@ async function main() {
     .description('Diagnose environment and configuration (node, config, network, API key, models)')
     .action(async () => {
       await runDoctor();
+    });
+
+  program
+    .command('mcp-server')
+    .description('Run fineCode as an MCP server over stdio (for Claude Desktop, IDE integrations, etc.)')
+    .action(async () => {
+      await runMcpServer(version);
+      // Don't exit — the server lives until stdin closes.
     });
 
   program
@@ -214,7 +225,8 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     provider: resolved.provider,
   });
 
-  const systemPrompt = await buildSystemPrompt(cwd);
+  const systemPromptBase = await buildSystemPrompt(cwd);
+  const systemPrompt = applyMode(systemPromptBase, session.getMeta().mode ?? 'none');
   const permissionManager = new PermissionManager({ bypass: resolved.bypass });
 
   let uiPermissionHandler: ((req: PermissionRequest) => void) | null = null;
@@ -252,6 +264,19 @@ async function launchRepl(opts: CliFlags, version: string): Promise<void> {
     mcpRecords = records;
     for (const t of mcpTools) agent.registerTool(t);
   }
+
+  // --- Register the SpawnAgentTool so the model can delegate to subagents ---
+  // Built AFTER MCP so subagents can see MCP tools in their inheritable pool
+  // (if the user whitelists them).
+  const currentToolList = (agent as unknown as { config: { tools: ToolDefinition[] } }).config.tools;
+  const spawnTool = createSpawnAgentTool({
+    parentTools: currentToolList,
+    parentModel: provider.model,
+    cwd,
+    parentSystemPrompt: systemPrompt,
+    depth: 0,
+  });
+  agent.registerTool(spawnTool);
 
   // The REPL needs a mutable session reference so /clear can swap it.
   // eslint-disable-next-line prefer-const

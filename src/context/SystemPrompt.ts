@@ -2,6 +2,7 @@ import { platform, hostname, userInfo, homedir } from 'node:os';
 import { promises as fs } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { anchorsSystemBlock } from './Anchors.js';
 
 /**
  * Build a dynamic system prompt with environment context.
@@ -37,6 +38,9 @@ export async function buildSystemPrompt(cwd: string): Promise<string> {
 
   const projectRules = await readProjectRules(cwd);
   if (projectRules) sections.push(`# Project rules\n${projectRules.trim()}`);
+
+  const anchors = anchorsSystemBlock();
+  if (anchors) sections.push(anchors);
 
   return sections.join('\n\n') + '\n';
 }

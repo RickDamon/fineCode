@@ -235,6 +235,48 @@ export function REPL({ agent, modelName, session, setSession, onPermissionReques
             totalTokens: agent.getCostSummary().totalTokens,
             cumulativeCost: event.cumulativeCost,
           });
+        } else if (event.type === 'subagent_event') {
+          // Render subagent activity inline, indented, and dimmed so parent flow stays readable.
+          const sub = event.event;
+          const prefix = `  ${'  '.repeat(event.depth - 1)}↳ [${event.agentName}]`;
+          if (sub.type === 'assistant_text') {
+            // Only show the first ~120 chars of the rolling buffer to avoid noise.
+            const preview = sub.buffer.slice(0, 120);
+            setItems(prev => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (
+                last &&
+                last.kind === 'info' &&
+                last.level === 'info' &&
+                last.text.startsWith(prefix + ' ')
+              ) {
+                next[next.length - 1] = { kind: 'info', level: 'info', text: `${prefix} ${preview}` };
+              } else {
+                next.push({ kind: 'info', level: 'info', text: `${prefix} ${preview}` });
+              }
+              return next;
+            });
+          } else if (sub.type === 'tool_start') {
+            setItems(prev => [
+              ...prev,
+              { kind: 'info', level: 'info', text: `${prefix} ⧖ ${sub.tool.name}` },
+            ]);
+          } else if (sub.type === 'tool_result') {
+            setItems(prev => [
+              ...prev,
+              {
+                kind: 'info',
+                level: sub.isError ? 'error' : 'ok',
+                text: `${prefix} ${sub.isError ? '✗' : '✓'} ${sub.tool.name}`,
+              },
+            ]);
+          } else if (sub.type === 'error') {
+            setItems(prev => [
+              ...prev,
+              { kind: 'info', level: 'error', text: `${prefix} ✗ ${sub.error.message.slice(0, 120)}` },
+            ]);
+          }
         } else if (event.type === 'error') {
           const err = event.error;
           if (err instanceof ProviderError) {

@@ -1,6 +1,6 @@
 # fineCode
 
-> a code tool designed by harness
+> 一个留在你终端里的编程 agent，换任何模型都能用，记得住每次你让它做过什么。
 
 一个极简的、模型无关的命令行编码代理 (coding agent)，继承自 Claude Code 的 **"harness 即一切"** 设计哲学。
 
@@ -8,12 +8,31 @@
 
 ## 特性
 
-- 🔌 **任意模型** — 一个命令切换：OpenAI / Anthropic / DeepSeek / Moonshot / OpenRouter / Groq / Ollama / vLLM / 任何 OpenAI 兼容端点
-- 🛡️ **三态权限模型** — allow / allow-always / deny，危险操作必须用户确认
+### 骨架
+- 🔌 **任意模型** — 一条命令切换：OpenAI / Anthropic / DeepSeek / Moonshot / OpenRouter / Groq / Ollama / 任何 OpenAI 兼容端点
+- 🛡️ **三态权限模型** — allow / allow-always / deny；危险操作必须用户确认
 - 🔧 **8 个核心工具** — bash / read_file / edit_file / write_file / grep / glob / ls / todo_write
-- 🌊 **流式输出** — 边生成边显示，Ctrl+C 可随时打断
 - 🧠 **隐式 Agent** — 没有预定义工作流，完全由模型驱动
-- 📦 **无 Anthropic/OpenAI SDK 锁定** — Anthropic provider 用原生 fetch 实现
+- 📦 **无 SDK 锁定** — Anthropic provider 用原生 fetch 实现
+
+### 长期使用
+- 💾 **会话持久化** — `fine -c` 接着上次聊，`/rewind` 回滚 AI 改过的文件
+- 💰 **Token & 成本追踪** — 状态栏实时显示 `24.5k tokens (37%) · $0.024`
+- 📎 **上下文锚** — `/anchor` 钉住"别忘了"的指令，跨 compact 永不丢
+- 🗜️ **两层压缩** — 大工具结果自动 micro-compact；历史逼近窗口自动 summarize
+
+### 多模型协作
+- 🤖 **Subagent 系统** — 让父 agent 调 `spawn_agent` 起子 agent 干脏活：research 用便宜模型、edit 用强模型、review 用第三个模型
+- ⚡ **并发工具** — 只读工具自动并行（一次读 5 个文件 ~ 1× 时间）
+
+### 扩展
+- 🔌 **MCP 双向** — 作为 **client** 接外部 MCP server（GitHub/Postgres/…），也能作为 **server** 让 Claude Desktop 调用 fine 的工具
+- 🎯 **Workflow 模式** — `/DDD` `/TDD` `/SDD` 三种强约束开发方式供自我约束的人用
+
+### 上下文
+- 📜 **FINE.md 规则** — 项目/全局 FINE.md 自动拼入 system prompt
+- 🩺 **fine doctor** — 一键诊断：Node / config / 网络 / API key / 模型名是否有效
+- ⚠️ **友好错误** — 把 `400 Model Not Exist` 翻译成"跑 fine doctor 看可用模型"
 
 ## 安装
 
@@ -117,6 +136,7 @@ fine -m gpt-4o --bypass
 | `fine sessions` | 列出最近的会话 |
 | `fine init` | 交互式配置向导；能联网时自动拉取 `/v1/models` 供你选择 |
 | `fine doctor` | 诊断环境与配置（Node / 配置 / 网络 / API key / 模型） |
+| `fine mcp-server` | 作为 MCP server 运行（供 Claude Desktop / IDE 等调用） |
 | `fine config` | 打印配置文件路径 |
 
 ## REPL 内斜杠命令
@@ -131,36 +151,148 @@ fine -m gpt-4o --bypass
 | `/clear` | 开启全新会话（清空历史，配置保留） |
 | `/compact` | 手动压缩历史（把老消息换成摘要） |
 | `/sessions` | 列出最近的会话 |
+| `/diff [pathFilter]` | 展示本次会话对文件的改动（基于 snapshot） |
 | `/rewind` | 回滚本次会话中所有被 AI 改过的文件 |
+| `/anchor <text>` | 钉一条"永不忘记"的指令（跨 compact 存活） |
+| `/anchors` | 列出当前锚 |
+| `/unanchor <id>` / `/unanchor all` | 移除锚 |
+| `/mode [none\|ddd\|tdd\|sdd]` | 切换 workflow 模式 |
+| `/ddd` `/tdd` `/sdd` | 模式快捷键 |
 | `/exit` | 退出 |
 
-## 会话持久化
+## Subagent 系统
+
+让父 agent 通过 `spawn_agent` 工具把任务甩给子 agent——**子 agent 走完 loop、调自己的工具，只把结论回给父 agent**，保持父 agent 的 context 干净。
+
+三种用法：
+
+```bash
+# 1. 零配置，模型自己决定什么时候 spawn
+#    子 agent 默认只读（read_file / grep / glob / ls / todo_write）
+
+# 2. 在 config.json 里定义预设
+#    让不同子 agent 用不同模型、不同工具白名单
+```
+
+```json
+{
+  "subagents": {
+    "research": {
+      "model": "gpt-4o-mini",
+      "systemPrompt": "You investigate code structure. Return a concise summary.",
+      "allow": ["read_file", "grep", "glob", "ls"],
+      "maxTurns": 15
+    },
+    "reviewer": {
+      "model": "claude-sonnet-4-5",
+      "systemPrompt": "You review code changes critically. Point out issues only.",
+      "allow": ["read_file", "grep"]
+    }
+  }
+}
+```
+
+之后模型就能写出 `spawn_agent(agent_type="research", prompt="...")` 调用。并发友好——多个 `spawn_agent` 调用会被分区并行跑。
+
+嵌套深度限制为 3（防 loop 爆炸）；subagent 默认 **写权限=deny**（read-only 是安全线），想让子 agent 写文件，把 `bash` / `write_file` / `edit_file` 加到 `allow` 并加 `--bypass` 启动。
+
+## Workflow 模式（DDD / TDD / SDD）
+
+默认 fineCode 奉行 "harness > framework"，但有些人（包括我）喜欢给自己加硬约束。三种预设模式：
+
+| 模式 | 约束 |
+|------|------|
+| `/ddd` | Domain-Driven Design：建模优先——在 `edit_file` 之前必须先确定 bounded context / entities / ubiquitous language |
+| `/tdd` | Test-Driven Development：Red→Green→Refactor 强制，不先写失败测试就不能写生产代码 |
+| `/sdd` | Spec-Driven Development：先写 spec（编号列表）+ plan（`todo_write`），用户批准后再动代码 |
+
+切回默认 harness：`/mode none`。
+模式会持久化到 session，`fine -c` 时自动恢复。
+
+## 上下文锚（Anchors）
+
+告诉 AI："不管你多久没跟我聊，这条永远记住。"
+
+```
+/anchor 这个项目用 pnpm，不要用 npm。
+/anchor 测试文件放在 __tests__/，不要放在 src/ 同级。
+/anchors                # 列出
+/unanchor abc123        # 移除
+/unanchor all           # 清空
+```
+
+**和 FINE.md 的区别**：FINE.md 是项目级规则（放在 repo 里 commit），anchors 是跨项目、跨会话的用户级 pinned context，存在 `~/.fineCode/anchors.json`，**auto-compact 永远不会吞掉它**。
+
+## 会话持久化 / Diff / Rewind
 
 每次对话自动保存到 `~/.fineCode/sessions/<session-id>.jsonl`（append-only），
 进程被 `Ctrl+C` 杀掉也不会丢。下次 `fine -c` 就能接着聊。
 
-快照：每次 AI 要用 `write_file` / `edit_file` 改文件**之前**，原文件会被备份到
-`~/.fineCode/sessions/<session-id>.snapshots/`。后悔了就 `/rewind` 一键还原。
+**文件改动全程留痕**：每次 AI 用 `write_file` / `edit_file` 改文件**之前**，原文件被备份到
+`~/.fineCode/sessions/<session-id>.snapshots/`。然后：
 
-## 上下文窗口
+- `/diff` — 显示本 session 每个被改文件的 unified diff（`+N -M` 行数汇总）
+- `/diff src/config` — 按路径过滤
+- `/rewind` — 一键还原本 session 所有被改过的文件到 session 开始前的状态
+
+## 上下文窗口 & 双层压缩
 
 状态栏实时显示：
 ```
 deepseek-chat · 24.5k tokens (37% of 65.5k) · $0.024
 ```
 
-接近窗口上限（> 70%）时 fineCode 会**自动压缩**历史：让同一个模型 summarize
-老消息，保留最近 6 条原样。触发时你会看到：
-```
-Auto-compacted 18 messages (approaching context window).
+两层压缩策略让对话可以"永远继续"：
+
+**Layer 1 — Micro-compact**（每次工具调用都触发）
+- 工具返回 > 8KB 时，在进 history **之前**自动 head+tail 截断
+- 保留前 40 行 + 后 20 行 + 中间标记
+- 不经过模型，零延迟零成本
+- 大 grep / cat 大文件 / 长构建日志，一次能省 50-90% token
+
+**Layer 2 — Auto-compact**（历史逼近窗口时触发）
+- 用量 > 70% 窗口时自动触发
+- 让同模型 summarize 老消息，保留最近 6 条 + 一条 summary
+- 或手动 `/compact`
+
+Anchors 始终在 system prompt 里，**不参与任一层压缩**。
+
+## MCP 双向支持
+
+### 作为 client —— 把外部 MCP server 的工具接进来
+
+在 config.json 里声明：
+```json
+{
+  "mcpServers": {
+    "github":   { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } },
+    "postgres": { "command": "mcp-server-postgres", "args": ["postgresql://..."] }
+  }
+}
 ```
 
-也可以随时手动 `/compact`。
+启动时自动连上，工具以 `<server>__<tool>` 形式暴露给模型（例如 `github__create_pr`）。
+
+### 作为 server —— 把 fine 的工具给别的工具用
+
+```bash
+fine mcp-server
+```
+
+通过 stdio 暴露 8 个内置工具。在 Claude Desktop 的 `claude_desktop_config.json` 里：
+```json
+{
+  "mcpServers": {
+    "fine": { "command": "fine", "args": ["mcp-server"] }
+  }
+}
+```
+之后 Claude Desktop 就能直接调 fine 的 `read_file` / `bash` 等。
 
 ## 项目级 / 用户级指令（FINE.md）
 
 在项目根目录或任一父目录放 `FINE.md`（或 `CLAUDE.md`），内容会自动拼到
-system prompt 里。用于记住项目约定：
+system prompt 里：
 
 ```markdown
 # FINE.md
@@ -173,27 +305,7 @@ system prompt 里。用于记住项目约定：
 
 ## 并发工具执行
 
-模型一次返回多个工具调用时，**只读工具（read_file / grep / glob / ls / todo_write）
-会被自动并行化**，写操作保持串行。一次读 5 个文件的耗时从 5× 降到 ~1×。
-
-## MCP (Model Context Protocol) 扩展
-
-在配置文件里声明 MCP server，启动时会自动连接并把它们的 tools 注册进来：
-
-```json
-{
-  "model": "deepseek-chat",
-  "preset": "deepseek",
-  "apiKey": "sk-...",
-  "mcpServers": {
-    "github":   { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"], "env": { "GITHUB_TOKEN": "..." } },
-    "postgres": { "command": "mcp-server-postgres", "args": ["postgresql://..."] }
-  }
-}
-```
-
-MCP 工具在 REPL 中以 `<server>__<tool>` 形式出现（例如 `github__create_pr`），
-因为可能有副作用，默认都需要用户授权。
+模型一次返回多个工具调用时，**只读工具（read_file / grep / glob / ls / todo_write / spawn_agent）会被自动并行化**，写操作保持串行。一次读 5 个文件的耗时从 5× 降到 ~1×。
 
 ## 错误诊断
 

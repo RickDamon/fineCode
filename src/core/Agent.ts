@@ -1,8 +1,9 @@
 import type { Provider } from './Provider.js';
-import type { Message, ToolCall, ToolDefinition, Usage } from './types.js';
+import type { Message, ToolCall, ToolDefinition, ToolExecutionContext, ToolResult, Usage } from './types.js';
 import type { PermissionManager, PermissionPrompt } from '../permission/PermissionManager.js';
 import type { Session } from '../session/Session.js';
 import { computeCost } from '../constants/pricing.js';
+import { microCompact } from '../commands/microCompact.js';
 
 export type AgentEvent =
   | { type: 'assistant_text'; delta: string; buffer: string }
@@ -14,6 +15,7 @@ export type AgentEvent =
   | { type: 'usage'; usage: Usage; model: string; cost: number; cumulativeCost: number }
   | { type: 'compacted'; droppedMessages: number; summary: string }
   | { type: 'info'; text: string }
+  | { type: 'subagent_event'; agentName: string; depth: number; event: AgentEvent }
   | { type: 'error'; error: Error };
 
 export interface AgentConfig {
@@ -79,6 +81,15 @@ export class Agent {
     this.toolMap.set(tool.name, tool);
     // Keep config.tools in sync so the provider sees the tool on the NEXT turn.
     this.config.tools = [...this.config.tools, tool];
+  }
+
+  /** Replace the system prompt for the next turn onwards (used by /mode). */
+  setSystemPrompt(systemPrompt: string): void {
+    this.config.systemPrompt = systemPrompt;
+  }
+
+  getSystemPrompt(): string {
+    return this.config.systemPrompt;
   }
 
   /** Erase in-memory history. Does NOT touch the persisted session log —
@@ -318,30 +329,82 @@ export class Agent {
     }
 
     yield { type: 'tool_start', call, tool };
+
+    // Event forwarder: tools that spawn agents (SpawnAgentTool) can push events
+    // here to stream sub-activity up to the parent UI. We collect them in a
+    // queue and flush interleaved with the await.
+    const forwardQueue: AgentEvent[] = [];
+    const forwardEvent = (ev: unknown) => {
+      forwardQueue.push(ev as AgentEvent);
+    };
+
     try {
-      const ctx = {
+      const ctx: ToolExecutionContext = {
         cwd: this.config.cwd,
         abortSignal,
         session: this.config.session,
         toolCallId: call.id,
+        forwardEvent,
       };
-      const result = await tool.execute(input, ctx);
+      const execPromise = tool.execute(input, ctx);
+
+      // Interleave: while waiting on execute, pump any forwarded events so the
+      // user sees subagent progress as it happens instead of a big burst at the end.
+      let settled = false;
+      let result: ToolResult | undefined;
+      let execError: unknown;
+      execPromise
+        .then(r => {
+          result = r;
+          settled = true;
+        })
+        .catch(e => {
+          execError = e;
+          settled = true;
+        });
+
+      while (!settled) {
+        while (forwardQueue.length > 0) yield forwardQueue.shift()!;
+        await new Promise(r => setImmediate(r));
+      }
+      // Drain any final events before reporting the result.
+      while (forwardQueue.length > 0) yield forwardQueue.shift()!;
+
+      if (execError) throw execError;
+      const r = result!;
+
+      // Micro-compact BEFORE the result hits history. The UI still sees the
+      // full content via the event (so folding in the REPL is user-visible),
+      // but the model's context gets the compacted version.
+      const { content: historyContent, compacted, originalBytes } = microCompact(
+        r.content,
+        tool.name,
+      );
+
       yield {
         type: 'tool_result',
         call,
         tool,
-        content: result.content,
-        isError: !!result.isError,
+        content: r.content,
+        isError: !!r.isError,
       };
+      if (compacted) {
+        yield {
+          type: 'info',
+          text: `↳ micro-compacted ${tool.name} result: ${originalBytes} → ${historyContent.length} bytes`,
+        };
+      }
       const toolMsg: Message = {
         role: 'tool',
         toolCallId: call.id,
         name: call.name,
-        content: result.content,
+        content: historyContent,
       };
       this.history.push(toolMsg);
       this.config.session?.recordMessage(toolMsg);
     } catch (err) {
+      // Drain any leftover forwarded events even on failure.
+      while (forwardQueue.length > 0) yield forwardQueue.shift()!;
       const msg = (err as Error).message;
       yield { type: 'tool_result', call, tool, content: msg, isError: true };
       const toolMsg: Message = {

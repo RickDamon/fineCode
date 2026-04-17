@@ -44,6 +44,25 @@ export interface StoredConfig {
       label?: string;
     }
   >;
+  /**
+   * Named subagent presets. When the model calls spawn_agent(agent_type="research", ...)
+   * it gets this preset applied. See src/tools/SpawnAgentTool.ts for the schema.
+   */
+  subagents?: Record<
+    string,
+    {
+      model?: string;
+      systemPrompt?: string;
+      allow?: string[];
+      description?: string;
+      maxTurns?: number;
+    }
+  >;
+  /**
+   * Context anchors — "pinned" notes injected into every request, NOT subject to compaction.
+   * Added via /anchor <text>. Keyed by short ids for easy removal.
+   */
+  anchors?: Record<string, { text: string; addedAt: number }>;
 }
 
 export const CONFIG_DIR = path.join(os.homedir(), '.fineCode');

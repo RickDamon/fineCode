@@ -40,6 +40,8 @@ export interface SessionMeta {
   totalCost: number;
   /** How many messages are currently in the log after any compactions. */
   messageCount: number;
+  /** Active workflow mode: none / ddd / tdd / sdd. */
+  mode?: 'none' | 'ddd' | 'tdd' | 'sdd';
 }
 
 export interface SnapshotRecord {
@@ -245,6 +247,18 @@ export class Session {
     this.writeLine({ t: 'compact', droppedMessages, summary });
     this.meta.messageCount -= droppedMessages;
     if (this.meta.messageCount < 0) this.meta.messageCount = 0;
+    this.flushMeta();
+  }
+
+  /** Persist the active workflow mode on the session meta. */
+  setMode(mode: SessionMeta['mode']): void {
+    this.meta.mode = mode;
+    this.flushMeta();
+  }
+
+  /** Persist an updated model (used when /model switches). */
+  setModel(model: string): void {
+    this.meta.model = model;
     this.flushMeta();
   }
 

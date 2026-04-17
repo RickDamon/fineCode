@@ -17,6 +17,10 @@ import { Session as SessionClass } from '../session/Session.js';
 import { createProvider, PRESETS } from '../providers/factory.js';
 import { getModelRate, formatCost, formatTokens } from '../constants/pricing.js';
 import { compactHistory } from './compact.js';
+import { applyMode, MODE_DESCRIPTIONS, type WorkflowMode } from '../context/WorkflowModes.js';
+import { buildSystemPrompt } from '../context/SystemPrompt.js';
+import { addAnchor, listAnchors, removeAnchor } from '../context/Anchors.js';
+import { unifiedDiff } from '../utils/diff.js';
 
 export interface SlashContext {
   agent: Agent;
@@ -101,10 +105,6 @@ const COMMANDS: SlashCommand[] = [
         };
       }
       try {
-        const meta = ctx.session.getMeta();
-        // Infer preset/baseUrl by sniffing the current session meta via a fresh resolveConfig
-        // would be heavy; we reuse the environment the CLI originally configured by reading
-        // the config file directly.
         const { readConfig, inferApiKeyFromEnv } = await import('../config/Config.js');
         const cfg = readConfig();
         const preset = cfg.preset;
@@ -121,18 +121,7 @@ const COMMANDS: SlashCommand[] = [
           provider: cfg.provider,
         });
         ctx.agent.setProvider(provider);
-        // Update the session meta so /cost and persisted pricing stay correct.
-        (ctx.session.getMeta as unknown as () => { model: string }); // no-op type hint
-        // We need to mutate session meta; use a small protected method if available.
-        // Session has no public setModel; write a patch directly to the meta file.
-        const metaPath = (ctx.session as unknown as { metaPath: string }).metaPath;
-        try {
-          const { promises: fs } = await import('node:fs');
-          const patched = { ...meta, model: newModel };
-          await fs.writeFile(metaPath, JSON.stringify(patched, null, 2), { mode: 0o600 });
-        } catch {
-          /* not fatal */
-        }
+        ctx.session.setModel(newModel);
         ctx.onModelChange?.(provider.name);
         return { lines: [`Switched to ${newModel}`], level: 'ok' };
       } catch (e) {
@@ -176,6 +165,76 @@ const COMMANDS: SlashCommand[] = [
           const title = (m.title ?? '(untitled)').replace(/\s+/g, ' ').slice(0, 50);
           return `  ${m.id}  ${ts}  ${title}`;
         }),
+        level: 'info',
+      };
+    },
+  },
+  {
+    name: 'diff',
+    description: 'Show a unified diff for each file the agent has changed this session',
+    run: async (args, ctx) => {
+      const filter = args.trim();
+      const snaps = ctx.session.getSnapshots();
+      if (snaps.length === 0) return { lines: ['No edits recorded in this session yet.'], level: 'info' };
+
+      // Earliest snapshot per path = pre-edit baseline (same grouping as /rewind).
+      const earliestByPath = new Map<string, (typeof snaps)[number]>();
+      for (const s of snaps) {
+        if (!earliestByPath.has(s.path)) earliestByPath.set(s.path, s);
+      }
+
+      const { promises: fs } = await import('node:fs');
+      const lines: string[] = [];
+      let filesShown = 0;
+      let totalAdd = 0;
+      let totalDel = 0;
+
+      for (const s of earliestByPath.values()) {
+        if (filter && !s.path.includes(filter)) continue;
+        let oldContent = '';
+        if (s.hash !== 'ABSENT') {
+          const buf = ctx.session.readSnapshot(s.hash);
+          if (!buf) {
+            lines.push(`## ${s.path}  (snapshot missing)`);
+            continue;
+          }
+          oldContent = buf.toString('utf8');
+        }
+        let newContent = '';
+        try {
+          newContent = await fs.readFile(s.path, 'utf8');
+        } catch (e) {
+          // File deleted after edit? Treat as empty.
+          if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+            lines.push(`## ${s.path}  (read error: ${(e as Error).message})`);
+            continue;
+          }
+        }
+        const result = unifiedDiff(oldContent, newContent, {
+          fromLabel: `${s.path} (snapshot)`,
+          toLabel: `${s.path} (current)`,
+        });
+        if (result.identical) continue;
+        filesShown++;
+        totalAdd += result.added;
+        totalDel += result.removed;
+        lines.push(
+          `## ${s.path}  (+${result.added} -${result.removed})`,
+          result.diff || '(empty)',
+          '',
+        );
+      }
+
+      if (filesShown === 0) {
+        return {
+          lines: filter
+            ? [`No diffs matching "${filter}".`]
+            : ['No meaningful changes (files match their snapshots).'],
+          level: 'info',
+        };
+      }
+      return {
+        lines: [`Summary: ${filesShown} file(s), +${totalAdd} -${totalDel}`, '', ...lines],
         level: 'info',
       };
     },
@@ -228,6 +287,77 @@ const COMMANDS: SlashCommand[] = [
     },
   },
   {
+    name: 'mode',
+    description: 'Switch workflow mode: none | ddd | tdd | sdd',
+    run: async (args, ctx) => {
+      const requested = args.trim().toLowerCase();
+      if (!requested) {
+        const current = ctx.session.getMeta().mode ?? 'none';
+        return {
+          lines: [
+            `Current mode: ${current}`,
+            '',
+            ...Object.entries(MODE_DESCRIPTIONS).map(([k, v]) => `  /mode ${k.padEnd(4)} — ${v}`),
+          ],
+          level: 'info',
+        };
+      }
+      if (!['none', 'ddd', 'tdd', 'sdd'].includes(requested)) {
+        return {
+          lines: [`Unknown mode: ${requested}. Valid: none / ddd / tdd / sdd`],
+          level: 'error',
+        };
+      }
+      return applyModeAndReport(requested as WorkflowMode, ctx);
+    },
+  },
+  { name: 'ddd', description: 'Shortcut for `/mode ddd`', run: async (_a, c) => applyModeAndReport('ddd', c) },
+  { name: 'tdd', description: 'Shortcut for `/mode tdd`', run: async (_a, c) => applyModeAndReport('tdd', c) },
+  { name: 'sdd', description: 'Shortcut for `/mode sdd`', run: async (_a, c) => applyModeAndReport('sdd', c) },
+  {
+    name: 'anchor',
+    description: 'Pin a note that survives compaction (e.g. /anchor always use pnpm)',
+    run: async (args, ctx) => {
+      const text = args.trim();
+      if (!text) {
+        const all = listAnchors();
+        if (all.length === 0) return { lines: ['No anchors set.'], level: 'info' };
+        return {
+          lines: ['Current anchors:', ...all.map(a => `  [${a.id}] ${a.text}`)],
+          level: 'info',
+        };
+      }
+      const a = addAnchor(text);
+      // Also refresh the system prompt immediately so the pinned note takes effect now.
+      await rebuildSystemPrompt(ctx);
+      return { lines: [`Pinned [${a.id}]: ${a.text}`], level: 'ok' };
+    },
+  },
+  {
+    name: 'anchors',
+    description: 'List pinned context entries',
+    run: async () => {
+      const all = listAnchors();
+      if (all.length === 0) return { lines: ['No anchors set.'], level: 'info' };
+      return {
+        lines: ['Pinned context:', ...all.map(a => `  [${a.id}] ${a.text}`)],
+        level: 'info',
+      };
+    },
+  },
+  {
+    name: 'unanchor',
+    description: 'Remove a pinned entry: /unanchor <id> or /unanchor all',
+    run: async (args, ctx) => {
+      const id = args.trim();
+      if (!id) return { lines: ['Usage: /unanchor <id> OR /unanchor all'], level: 'error' };
+      const ok = removeAnchor(id);
+      if (!ok) return { lines: [`No anchor with id "${id}".`], level: 'error' };
+      await rebuildSystemPrompt(ctx);
+      return { lines: [id === 'all' ? 'All anchors cleared.' : `Removed [${id}].`], level: 'ok' };
+    },
+  },
+  {
     name: 'exit',
     description: 'Exit fineCode',
     run: (_args, ctx) => {
@@ -238,6 +368,41 @@ const COMMANDS: SlashCommand[] = [
 ];
 
 const COMMAND_MAP = new Map(COMMANDS.map(c => [c.name, c]));
+
+/**
+ * Rebuild the system prompt with the current mode/anchors and hot-swap it.
+ * Called after /anchor, /unanchor so pinned context takes effect immediately.
+ */
+async function rebuildSystemPrompt(ctx: SlashContext): Promise<void> {
+  const meta = ctx.session.getMeta();
+  const base = await buildSystemPrompt(meta.cwd);
+  ctx.agent.setSystemPrompt(applyMode(base, meta.mode ?? 'none'));
+}
+
+/**
+ * Rebuild the system prompt with the requested mode layered on and hot-swap
+ * it into the agent. Persists the mode to the session so resume keeps it.
+ */
+async function applyModeAndReport(
+  mode: WorkflowMode,
+  ctx: SlashContext,
+): Promise<SlashResult> {
+  try {
+    const meta = ctx.session.getMeta();
+    const base = await buildSystemPrompt(meta.cwd);
+    ctx.agent.setSystemPrompt(applyMode(base, mode));
+    ctx.session.setMode(mode);
+    return {
+      lines:
+        mode === 'none'
+          ? ['Mode cleared. Back to the default harness.']
+          : [`Mode set to ${mode.toUpperCase()}.`, MODE_DESCRIPTIONS[mode]],
+      level: 'ok',
+    };
+  } catch (e) {
+    return { lines: [`Failed to set mode: ${(e as Error).message}`], level: 'error' };
+  }
+}
 
 /** Returns null if input is not a slash command. */
 export async function tryRunSlashCommand(

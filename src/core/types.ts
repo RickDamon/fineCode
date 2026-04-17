@@ -57,6 +57,12 @@ export interface ToolExecutionContext {
   session?: import('../session/Session.js').Session;
   /** Tool-call id assigned by the model; useful for snapshot correlation. */
   toolCallId?: string;
+  /**
+   * Opt-in event forwarder. Tools that spawn their own agents (like SpawnAgentTool)
+   * push subagent events here so the host's UI stream sees them in real time.
+   * Agent installs this when it calls the tool; it's `undefined` outside that flow.
+   */
+  forwardEvent?: (ev: unknown) => void;
 }
 
 export interface ToolResult {

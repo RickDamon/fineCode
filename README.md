@@ -27,6 +27,7 @@
 ### 多模型协作
 - 🤖 **Subagent 系统** — 让父 agent 调 `spawn_agent` 起子 agent 干脏活：research 用便宜模型、edit 用强模型、review 用第三个模型
 - ⚡ **并发工具** — 只读工具自动并行（一次读 5 个文件 ~ 1× 时间）
+- 💡 **便宜模型最大化指南** — 基于 2026-04 最新格局（对标 Claude Opus 4.7），单模型党友好，用国产模型拿到 ~85% 体验花 5% 的钱，详见下方 [实战指南](#用便宜模型最大化发挥实战指南)
 
 ### 扩展
 - 🔌 **MCP 双向** — 作为 **client** 接外部 MCP server（GitHub/Postgres/…），也能作为 **server** 让 Claude Desktop 调用 fine 的工具
@@ -480,6 +481,177 @@ src/
 | Agent 循环 | 朴素 while loop | 隐式 Agent 哲学 |
 | 并发工具执行 | 顺序执行 | 简单安全，未来可扩展 |
 | 权限策略 | 工具自声明 | 只读工具 never 需要权限 |
+
+## 用便宜模型最大化发挥（实战指南）
+
+> **基准日期：2026-04-18**。对标 **Claude Opus 4.7**（Anthropic 于 2026-04-16 发布的当前旗舰，SWE-bench Verified **87.6%** / SWE-bench Pro **64.3%** / CursorBench **70%**，新增 `xhigh` effort 和自验证机制，$5 / $25 per M tokens）。国产开源主力迭代到 **Kimi K2.6 / GLM-5.1 / MiniMax M2.5 / DeepSeek V4 / Qwen3**。
+>
+> **谁该看这节**：想用国产模型或便宜模型省钱、但又不想放弃太多体验的个人/小团队开发者。下面这套做法**默认只用一个模型**（大部分人的真实用法），subagent 分级那套只作为可选进阶放在最后。
+
+### 1. 选一个主力模型就够了
+
+绝大多数人每天就开一个终端、配一个模型、开干。**不用折腾多模型编排**。2026-04 粗排：
+
+| 你的场景 | 推荐 | 月度成本量级 | 接近 Opus 4.7 的程度 |
+|---------|------|-------------|---------------------|
+| 就想省钱，日常搬砖、改 bug、写小工具 | **Kimi K2.6** | $5-20 | ~55% 裸用，叠完下面做法能到 **~85%** |
+| 个人项目偶尔吃点硬任务，想平衡 | **Claude Sonnet 4.5** | $30-80 | **~90%**（性价比甜点）|
+| 吃饭的硬核工作，不能掉链子 | **Claude Opus 4.7 xhigh** | $200+ | 100%（基准）|
+| 全程本地、隐私场景 | **Qwen3-Coder** (Ollama) | $0 | ~40% |
+| 纯中文需求沟通 / 写注释写文档 | 任何国产模型 | — | 这个场景国产能反超 |
+
+> 选 Kimi K2.6 的人最多（fineCode 用户画像偏省钱）。下面做法都按"主力 Kimi K2.6"来写，**其他模型同理**。
+
+### 2. 第一件事：写 `FINE.md`
+
+Opus 4.7 对隐式约定的推理能力已经很强（它能自己猜出你用 pnpm），国产模型需要你**写明白**。花 5 分钟写 30 行，之后每次对话都省心：
+
+```markdown
+# FINE.md
+## 项目约定
+- 包管理器：pnpm。**禁止**用 npm / yarn。
+- 测试框架：vitest（非 jest）。测试文件放在源文件同级 `__tests__/`。
+- 所有 API 路由：src/app/api/[...]/route.ts
+- 运行时校验：Zod。禁止手写 `typeof` 校验。
+
+## 禁止事项
+- 不要自己跑 `git commit` / `git push`。
+- 不要编辑 `*.generated.ts`。
+- 改 schema 时必须同步更新 migrations/。
+
+## 代码风格
+- 函数优先 async/await，避免 .then 链。
+- 错误处理：抛自定义 Error 子类，不抛字符串。
+```
+
+国产模型遵从**显式硬约束**的能力其实不弱，比让它"自己判断"稳得多。**这一步投入产出比最高。**
+
+### 3. 遇到 debug / 不确定的事，打开 `/tdd`
+
+Opus 4.7 有内置的 self-verification（返回前自检），**国产模型没这机制**，最容易出的毛病是：**写完不自测，自信地说"已完成"但其实没跑通**。
+
+```
+/tdd              # 进 TDD 模式
+（让它干活）
+/mode none        # 写完切回默认，继续日常用
+```
+
+TDD 模式下模型必须先写失败测试、跑通实现、再报告完成。在"不知道 bug 在哪"这类场景里，这一个开关能把国产模型的效果从 30 分拉到 55 分——**它其实不是"不会"，而是"不会主动验证"**，TDD 强制把这一步补上。
+
+### 4. 跨文件任务：开头就用 `/anchor` 钉死关键约束
+
+国产模型在 20 轮对话之后容易忘掉最初的要求（Opus 4.7 能扛到 80+ 轮）。**真正的陷阱是它不会告诉你它忘了，还在一本正经地改错**。第一轮就钉死：
+
+```
+/anchor 本次重构：只改 src/api/ 下的文件，测试先不动。
+/anchor 所有新增 handler 必须用 asyncHandler 包一层。
+/anchor 最后给我一个 changelog，列出每个被改的 endpoint。
+```
+
+Anchors 永远在 system prompt 里，**auto-compact 也吞不掉**。这一步能把国产模型的"长会话跑偏率"从 40% 压到 10% 以下。
+
+### 5. 对话卫生：勤 `/clear`，别迷信长上下文
+
+国产模型在 30+ 轮之后衰减比 Opus 4.7 明显得多。一个任务做完就：
+
+```
+/remember      # （可选）存下这个项目学到的事实到长期记忆
+/clear         # 开新会话。历史清空，但 FINE.md / memory / anchors / skills 都还在
+```
+
+**Kimi 的 256K 是应急用的，不是给你天天填满的。** 比硬扛超长上下文效果好太多。
+
+### 6. 让模型"越用越懂你"：`/remember` 和 `/skill save`
+
+做完一个有代表性的任务后（比如第一次成功部署、第一次跑通某个脚本），花 5 秒：
+
+```
+/skill save            # 把做法固化成 SKILL.md，下次触发词命中时自动注入
+/remember              # 把项目的关键事实存进长期记忆
+```
+
+下次你在同一目录打开 fineCode，长期记忆会自动注入；说"帮我部署"时命中的 skill 也会自动拼进 system prompt。**本质是在手动给国产模型补齐它缺失的"项目直觉"**——Opus 4.7 能自己从对话历史里推断出这些，国产模型记性没那么好。
+
+### 7. 关键节点花 5 秒人工 review
+
+这是用便宜模型省下的钱应该**花回去**的地方——把心态从"全自动"调成"结对编程"：
+
+- 模型说"已完成"时：先 `/diff` 看一眼改了啥，再决定要不要放行
+- 重构跨 5 个以上文件：**别一次性让它干完**，拆成几个短会话，每个 review 完再进下一个
+- 测试通过时：自己心里默念一句"真的吗"，让它 `bash npm test` 再跑一次
+
+这一项大概能加 10-15 分，也是整套打法里最反直觉但最有效的。
+
+### 效果对照表（主力 Kimi K2.6，基准 Opus 4.7 xhigh = 100）
+
+| 做法 | 增量 | 累计分数 | 额外成本 |
+|------|------|---------|---------|
+| 裸用 Kimi K2.6，什么都不配 | 起点 | **55** | — |
+| + FINE.md | +8 | 63 | 0（一次性 5 分钟）|
+| + 遇 debug 开 `/tdd` | +8 | 71 | 0 |
+| + 跨文件任务钉 anchors | +5 | 76 | 0 |
+| + 对话卫生（勤 `/clear`）| +3 | 79 | 0（反而更省 token）|
+| + `/remember` + skills 长期积累 | +3 | 82 | 0 |
+| + 关键节点人工 review | +3 | **85** | 你自己的时间 |
+
+叠满大致能到 **Opus 4.7 的 85% 体验，综合成本 ~5%**。对个人项目和大多数小团队场景，**这是 2026 年春天最划算的配置**——**什么多模型编排都不用搞，一个 Kimi 开到底**。
+
+如果碰到啃不动的硬骨头（疑难 debug、跨 10+ 文件的复杂重构、深层架构决策），**老老实实临时切 Opus 4.7**：
+
+```
+/model claude-opus-4-7
+（让它干完）
+/model kimi-k2-thinking   # 干完切回来
+```
+
+**fineCode 是 provider-agnostic 的，一条命令切回去，这是它相对单一厂商 CLI 最大的优势。** 不用为了省那点钱在硬任务上耗一整天。
+
+---
+
+### 进阶：多模型 subagent 分级（可选，多数人不需要）
+
+> **警告**：这节是给已经把上面单模型全套跑熟、还想继续压最后一点成本或体验的人看的。**大部分开发者不会走到这一步**——单模型 85 分已经够用了。
+
+fineCode 的 `spawn_agent` 工具支持父 agent 在任务中途把子任务甩给**另一个模型**——子 agent 走完自己的 loop、只把结论回给父 agent。典型分工：
+
+- **主 agent（Kimi K2.6）** 负责规划和编码
+- **research subagent（DeepSeek V4）** 干脏活：grep 一堆文件、读代码、总结
+- **reviewer subagent（GLM-5.1）** 最后交叉 review 一遍
+- **hard-debug subagent（Opus 4.7）** 只在主 agent 卡住时才出手，硬骨头兜底
+
+```json
+{
+  "model": "kimi-k2-thinking",
+  "subagents": {
+    "research": {
+      "model": "deepseek-chat",
+      "systemPrompt": "You investigate code structure. Read files, grep, summarize. Return concise findings with file:line anchors.",
+      "allow": ["read_file", "grep", "glob", "ls"],
+      "maxTurns": 20
+    },
+    "reviewer": {
+      "model": "glm-5.1",
+      "systemPrompt": "You review code changes critically. Point out issues only, no praise.",
+      "allow": ["read_file", "grep"],
+      "maxTurns": 10
+    },
+    "hard-debug": {
+      "model": "claude-opus-4-7",
+      "systemPrompt": "You debug tough, multi-layer bugs. Verify hypotheses with reproductions.",
+      "allow": ["read_file", "grep", "glob", "bash", "edit_file"],
+      "maxTurns": 40
+    }
+  }
+}
+```
+
+**收益**：硬骨头任务自动有 Opus 兜底（不用手动切），研究类脏活用最便宜的 DeepSeek 跑，综合大概比单模型再省 20-30% token。
+
+**成本**：要花时间调每个 subagent 的 system prompt，观察它们什么时候会被主 agent 触发；碰到 subagent 结论不靠谱时还得回来 debug。**前期维护成本相当可观。**
+
+> 老实说：我（作者）自己 90% 时间都是单模型裸开 Kimi。subagent 分级是给那种"每天十几个会话、要跑一整天任务"的重度用户准备的。如果你一天只开 1-3 个会话，单模型就够了。
+
+---
 
 ## 对比 Claude Code
 

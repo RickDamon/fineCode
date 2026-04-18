@@ -56,6 +56,30 @@ npm run build
 
 > 要求 Node.js >= 18。
 
+## VS Code 扩展
+
+除了 CLI，fineCode 也有一个 **VS Code 扩展**，把同一套 agent 搬到 IDE 侧边栏里，共享 `~/.fineCode/config.json` 配置和会话历史。
+
+```bash
+# 从源码构建并安装
+cd extension
+npm install
+npm run build          # esbuild 打包：dist/extension.js + dist/webview.js
+npm run package        # 产出 fine-code.vsix (~350KB)
+code --install-extension fine-code.vsix
+
+# 或者按 F5 在 Extension Development Host 里调试
+```
+
+特点：
+- 同一套核心（Agent / Session / PermissionManager / Provider）**零改动复用**
+- CLI 和扩展读同一个 `~/.fineCode/config.json`、同一个 sessions 目录、同一套 anchors/skills/memory
+- 权限弹窗在 Webview 里以 inline dialog 方式出现
+- 斜杠命令 `/clear` `/model` `/cost` `/compact` `/sessions` `/diff` 都可用
+- 包体积 ~350KB，启动瞬间
+
+详见 [`extension/README.md`](./extension/README.md)。
+
 ## 快速开始
 
 ```bash

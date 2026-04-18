@@ -1,0 +1,127 @@
+{
+  "name": "fine-code-vscode",
+  "displayName": "fineCode",
+  "description": "A model-agnostic coding agent, right in your VS Code sidebar. Bring your own key (OpenAI / Anthropic / DeepSeek / Kimi / GLM / MiniMax / Ollama / ...).",
+  "version": "0.1.0",
+  "publisher": "fineCode",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "llm",
+    "claude",
+    "deepseek",
+    "kimi"
+  ],
+  "main": "./dist/extension.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RickDamon/fineCode.git"
+  },
+  "license": "MIT",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "fineCode",
+          "title": "fineCode",
+          "icon": "./media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "fineCode": [
+        {
+          "type": "webview",
+          "id": "fineCode.chat",
+          "name": "Chat",
+          "icon": "./media/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "fineCode.open",
+        "title": "fineCode: Open Chat",
+        "category": "fineCode"
+      },
+      {
+        "command": "fineCode.newSession",
+        "title": "fineCode: New Session",
+        "category": "fineCode"
+      },
+      {
+        "command": "fineCode.continueSession",
+        "title": "fineCode: Continue Last Session",
+        "category": "fineCode"
+      },
+      {
+        "command": "fineCode.openConfig",
+        "title": "fineCode: Open Config File",
+        "category": "fineCode"
+      }
+    ],
+    "configuration": {
+      "title": "fineCode",
+      "properties": {
+        "fineCode.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model identifier. Overrides ~/.fineCode/config.json. Example: 'deepseek-chat', 'claude-opus-4-7', 'kimi-k2.5'."
+        },
+        "fineCode.preset": {
+          "type": "string",
+          "enum": ["", "openai", "deepseek", "moonshot", "zhipu", "minimax", "openrouter", "groq", "together", "ollama"],
+          "default": "",
+          "description": "Preset that resolves a base URL. Leave empty to use ~/.fineCode/config.json."
+        },
+        "fineCode.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key. Prefer the shell env var or ~/.fineCode/config.json; this setting is only for quick experiments.",
+          "markdownDescription": "API key. **Security note**: VS Code stores this in `settings.json` in plain text. Prefer the shell env var or `~/.fineCode/config.json` (mode 0600)."
+        },
+        "fineCode.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Custom base URL for OpenAI-compatible endpoints."
+        },
+        "fineCode.bypassPermissions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-approve all tool calls (yolo mode). Use with caution — the agent can write files and run shell commands."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "npm run build && vsce package --no-dependencies -o fine-code.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "openai": "^4.67.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^3.23.8"
+  }
+}

@@ -21,7 +21,8 @@ export interface ModelRate {
 const ZERO: ModelRate = { input: 0, output: 0, contextWindow: 8_192 };
 
 // Prefix match: model starts with key → use that rate.
-// Order matters: longer / more specific prefixes first.
+// Order matters: longer / more specific prefixes first (e.g. claude-opus-4-7
+// before claude-opus-4, since the 4.7 pricing differs from 4.x).
 const PRICING_TABLE: Array<[string, ModelRate]> = [
   // DeepSeek
   ['deepseek-reasoner', { input: 0.55, output: 2.19, contextWindow: 65_536 }],
@@ -37,8 +38,13 @@ const PRICING_TABLE: Array<[string, ModelRate]> = [
   ['o1-mini', { input: 3, output: 12, contextWindow: 128_000 }],
   ['o1', { input: 15, output: 60, contextWindow: 200_000 }],
 
-  // Anthropic (values reflect Claude's public pricing)
+  // Anthropic (Claude). More specific prefixes FIRST.
+  // Opus 4.7 (released 2026-04-16): $5/$25 per M tokens, per Anthropic pricing.
+  ['claude-opus-4-7', { input: 5, output: 25, contextWindow: 200_000 }],
+  ['claude-opus-4-6', { input: 5, output: 25, contextWindow: 200_000 }],
   ['claude-opus-4', { input: 15, output: 75, contextWindow: 200_000 }],
+  ['claude-sonnet-4-7', { input: 3, output: 15, contextWindow: 200_000 }],
+  ['claude-sonnet-4-5', { input: 3, output: 15, contextWindow: 200_000 }],
   ['claude-sonnet-4', { input: 3, output: 15, contextWindow: 200_000 }],
   ['claude-3-5-sonnet', { input: 3, output: 15, contextWindow: 200_000 }],
   ['claude-3-5-haiku', { input: 0.8, output: 4, contextWindow: 200_000 }],
@@ -46,9 +52,25 @@ const PRICING_TABLE: Array<[string, ModelRate]> = [
   ['claude-3-haiku', { input: 0.25, output: 1.25, contextWindow: 200_000 }],
 
   // Moonshot / Kimi
+  // 2026 K2 series — 256K context; pricing from Moonshot's published rates.
+  ['kimi-k2.5', { input: 0.55, output: 2.19, contextWindow: 256_000 }],
+  ['kimi-k2-thinking', { input: 0.55, output: 2.19, contextWindow: 256_000 }],
+  ['kimi-k2', { input: 0.55, output: 2.19, contextWindow: 256_000 }],
+  // Legacy moonshot-v1
   ['moonshot-v1-128k', { input: 8.57, output: 8.57, contextWindow: 128_000 }],
   ['moonshot-v1-32k', { input: 3.43, output: 3.43, contextWindow: 32_000 }],
   ['moonshot-v1-8k', { input: 1.71, output: 1.71, contextWindow: 8_000 }],
+
+  // Zhipu GLM (2026)
+  ['glm-5.1', { input: 0.7, output: 2.1, contextWindow: 128_000 }],
+  ['glm-5', { input: 0.7, output: 2.1, contextWindow: 128_000 }],
+  ['glm-4.6', { input: 0.55, output: 1.65, contextWindow: 128_000 }],
+  ['glm-4', { input: 0.55, output: 1.65, contextWindow: 128_000 }],
+
+  // MiniMax M2 series (2026). Case preserved to match official model IDs.
+  ['minimax-m2.7', { input: 0.3, output: 1.2, contextWindow: 192_000 }],
+  ['minimax-m2.5', { input: 0.3, output: 1.2, contextWindow: 192_000 }],
+  ['minimax-m2', { input: 0.3, output: 1.2, contextWindow: 192_000 }],
 
   // Groq (free tier-ish, roughly)
   ['llama-3.3-70b', { input: 0.59, output: 0.79, contextWindow: 128_000 }],

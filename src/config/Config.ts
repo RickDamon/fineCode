@@ -6,7 +6,8 @@
  *
  * Resolution priority (high → low):
  *   1. CLI flags  (--model / --api-key / --base-url / --preset / --provider)
- *   2. Environment variables  (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY / ...)
+ *   2. Environment variables  (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY /
+ *      MOONSHOT_API_KEY / ZHIPU_API_KEY / MINIMAX_API_KEY / OPENROUTER_API_KEY / ...)
  *   3. Config file
  *
  * The file is created with mode 0600 so the API key is readable only by the owner.
@@ -18,7 +19,7 @@ import { configFile, profileRoot } from './paths.js';
 export interface StoredConfig {
   /** Default model identifier, e.g. "deepseek-chat", "gpt-4o", "claude-sonnet-4-5". */
   model?: string;
-  /** Preset name: openai / deepseek / moonshot / openrouter / groq / together / ollama. */
+  /** Preset name: openai / deepseek / moonshot / zhipu / minimax / openrouter / groq / together / ollama. */
   preset?: string;
   /** Explicit provider override: openai | anthropic | ollama. */
   provider?: 'openai' | 'anthropic' | 'ollama';
@@ -119,7 +120,9 @@ export function inferApiKeyFromEnv(
 ): string | undefined {
   const presetKey: Record<string, string | undefined> = {
     deepseek: process.env.DEEPSEEK_API_KEY,
-    moonshot: process.env.MOONSHOT_API_KEY,
+    moonshot: process.env.MOONSHOT_API_KEY ?? process.env.KIMI_API_KEY,
+    zhipu: process.env.ZHIPU_API_KEY ?? process.env.BIGMODEL_API_KEY,
+    minimax: process.env.MINIMAX_API_KEY,
     openrouter: process.env.OPENROUTER_API_KEY,
     groq: process.env.GROQ_API_KEY,
     together: process.env.TOGETHER_API_KEY,
@@ -138,6 +141,9 @@ export function inferApiKeyFromEnv(
     process.env.DEEPSEEK_API_KEY ??
     process.env.OPENROUTER_API_KEY ??
     process.env.MOONSHOT_API_KEY ??
+    process.env.KIMI_API_KEY ??
+    process.env.ZHIPU_API_KEY ??
+    process.env.MINIMAX_API_KEY ??
     process.env.GROQ_API_KEY
   );
 }

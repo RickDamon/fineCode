@@ -17,6 +17,8 @@ const PRESET_NAMES = [
   'openai',
   'deepseek',
   'moonshot',
+  'zhipu',
+  'minimax',
   'openrouter',
   'groq',
   'together',
@@ -28,6 +30,8 @@ const PRESET_BASE_URLS: Record<string, string | undefined> = {
   openai: 'https://api.openai.com/v1',
   deepseek: 'https://api.deepseek.com/v1',
   moonshot: 'https://api.moonshot.cn/v1',
+  zhipu: 'https://open.bigmodel.cn/api/paas/v4',
+  minimax: 'https://api.minimax.chat/v1',
   openrouter: 'https://openrouter.ai/api/v1',
   groq: 'https://api.groq.com/openai/v1',
   together: 'https://api.together.xyz/v1',
@@ -39,15 +43,47 @@ const PRESET_BASE_URLS: Record<string, string | undefined> = {
  * invent names like "deepseek-v3" that the API doesn't accept. This list is
  * intentionally small — it's guidance, not validation (user can still type
  * anything).
+ *
+ * Snapshot: 2026-04. Lists include current flagships first, older IDs last
+ * for compatibility.
  */
 const KNOWN_MODELS: Record<string, string[]> = {
   deepseek: ['deepseek-chat', 'deepseek-reasoner'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'o1', 'o1-mini', 'o3-mini'],
-  moonshot: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
+  moonshot: [
+    // 2026 Kimi K2 series (current)
+    'kimi-k2.5',
+    'kimi-k2-thinking',
+    'kimi-k2-0905-preview',
+    // Legacy moonshot-v1 (still works)
+    'moonshot-v1-8k',
+    'moonshot-v1-32k',
+    'moonshot-v1-128k',
+  ],
+  zhipu: [
+    // 2026 GLM-5 series (current)
+    'glm-5.1',
+    'glm-5',
+    // Legacy GLM-4 (still works)
+    'glm-4.6',
+    'glm-4-plus',
+  ],
+  minimax: [
+    // 2026 M2 series (current)
+    'MiniMax-M2.7',
+    'MiniMax-M2.5',
+    'MiniMax-M2',
+  ],
   groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'],
   together: ['meta-llama/Llama-3.3-70B-Instruct-Turbo'],
-  openrouter: ['anthropic/claude-sonnet-4', 'openai/gpt-4o'],
-  ollama: ['qwen2.5-coder:7b', 'llama3.1:8b'],
+  openrouter: [
+    'anthropic/claude-opus-4-7',
+    'anthropic/claude-sonnet-4-5',
+    'moonshotai/kimi-k2.5',
+    'zhipuai/glm-5.1',
+    'openai/gpt-4o',
+  ],
+  ollama: ['qwen2.5-coder:7b', 'qwen3-coder:30b', 'llama3.1:8b'],
 };
 
 type Stdin = NodeJS.ReadStream & { isTTY?: boolean; setRawMode?: (b: boolean) => void };
@@ -191,9 +227,11 @@ export async function runInit(): Promise<void> {
     deepseek: 'deepseek-chat',
     openai: 'gpt-4o',
     ollama: 'qwen2.5-coder:7b',
-    moonshot: 'moonshot-v1-32k',
+    moonshot: 'kimi-k2.5',
+    zhipu: 'glm-5.1',
+    minimax: 'MiniMax-M2.5',
     groq: 'llama-3.3-70b-versatile',
-    openrouter: 'anthropic/claude-sonnet-4',
+    openrouter: 'anthropic/claude-sonnet-4-5',
     together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
   };
   const defaultModel = existing.model ?? defaults[preset] ?? '';

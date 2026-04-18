@@ -9,7 +9,7 @@
 ## 特性
 
 ### 骨架
-- 🔌 **任意模型** — 一条命令切换：OpenAI / Anthropic / DeepSeek / Moonshot / OpenRouter / Groq / Ollama / 任何 OpenAI 兼容端点
+- 🔌 **任意模型** — 一条命令切换：OpenAI / Anthropic / DeepSeek / Moonshot (Kimi) / 智谱 GLM / MiniMax / OpenRouter / Groq / Ollama / 任何 OpenAI 兼容端点
 - 🛡️ **三态权限模型** — allow / allow-always / deny；危险操作必须用户确认
 - 🔧 **8 个核心工具** — bash / read_file / edit_file / write_file / grep / glob / ls / todo_write
 - 🧠 **隐式 Agent** — 没有预定义工作流，完全由模型驱动
@@ -73,7 +73,7 @@ fine
 运行时参数按下面的优先级合并（高优先级覆盖低优先级）：
 
 1. **命令行 flag** — `--model` / `--api-key` / `--base-url` / `--preset` / `--provider` / `--bypass`
-2. **环境变量** — `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `MOONSHOT_API_KEY` / `OPENROUTER_API_KEY` / `GROQ_API_KEY` / `TOGETHER_API_KEY`
+2. **环境变量** — `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` / `MOONSHOT_API_KEY` (或 `KIMI_API_KEY`) / `ZHIPU_API_KEY` / `MINIMAX_API_KEY` / `OPENROUTER_API_KEY` / `GROQ_API_KEY` / `TOGETHER_API_KEY`
 3. **配置文件** — `~/.fineCode/config.json`（可用 `fine config` 打印路径）
 
 ## 使用示例
@@ -91,17 +91,27 @@ fine               # 以后直接用
 # OpenAI
 fine --model gpt-4o --api-key sk-xxx
 
-# Claude
-fine --model claude-sonnet-4-5-20250929 --api-key sk-ant-xxx
+# Claude (Opus 4.7, the 2026 flagship)
+fine --model claude-opus-4-7 --api-key sk-ant-xxx
+fine --model claude-sonnet-4-5 --api-key sk-ant-xxx
 
 # DeepSeek
 fine --model deepseek-chat --preset deepseek --api-key xxx
+
+# Kimi (Moonshot) — K2.5 is the current coding flagship
+fine --model kimi-k2.5 --preset moonshot --api-key sk-xxx
+
+# 智谱 GLM
+fine --model glm-5.1 --preset zhipu --api-key xxx
+
+# MiniMax
+fine --model MiniMax-M2.5 --preset minimax --api-key xxx
 
 # Ollama 本地模型（无需 key）
 fine --model qwen2.5-coder:7b --preset ollama
 
 # OpenRouter
-fine --model anthropic/claude-sonnet-4 --preset openrouter --api-key sk-or-xxx
+fine --model anthropic/claude-opus-4-7 --preset openrouter --api-key sk-or-xxx
 ```
 
 ### 使用环境变量

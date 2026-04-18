@@ -41,6 +41,8 @@ export const PRESETS: Record<string, Partial<ProviderConfig>> = {
   openai: { baseUrl: undefined },
   deepseek: { baseUrl: 'https://api.deepseek.com/v1' },
   moonshot: { baseUrl: 'https://api.moonshot.cn/v1' },
+  zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  minimax: { baseUrl: 'https://api.minimax.chat/v1' },
   openrouter: { baseUrl: 'https://openrouter.ai/api/v1' },
   groq: { baseUrl: 'https://api.groq.com/openai/v1' },
   together: { baseUrl: 'https://api.together.xyz/v1' },

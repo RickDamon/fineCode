@@ -32,6 +32,7 @@
 ### 扩展
 - 🔌 **MCP 双向** — 作为 **client** 接外部 MCP server（GitHub/Postgres/…），也能作为 **server** 让 Claude Desktop 调用 fine 的工具
 - 🎯 **Workflow 模式** — `/DDD` `/TDD` `/SDD` 三种强约束开发方式供自我约束的人用
+- 🧩 **VS Code 插件** — 同一套核心（零改动）跑在 VS Code 侧边栏 Webview 里，与 CLI 共享 `config.json` / sessions / anchors / skills / memory，详见下方 [VS Code 扩展](#vs-code-扩展)
 
 ### 上下文
 - 📜 **FINE.md 规则** — 项目/全局 FINE.md 自动拼入 system prompt
@@ -40,18 +41,32 @@
 
 ## 安装
 
+### 方式 1：一键脚本（推荐）
+
+自动装 Node（如果缺）+ clone 源码 + build + `npm link`。目前 npm registry 上还没发布，脚本会自动 fallback 到从源码安装；将来发包后同一个脚本会无缝切到 `npm i -g`。
+
 ```bash
-# 一键脚本（推荐，自动装 Node）
 curl -fsSL https://raw.githubusercontent.com/RickDamon/fineCode/main/scripts/install.sh | bash
+```
 
-# 或者全局装 npm 包
-npm install -g fine-code
+> 源码会被 clone 到 `~/.fineCode/src/`，`fine` 命令通过 `npm link` 暴露到全局。脚本不动你的 sudo，不改动 shell profile（除非是首次装 Node 才追加 fnm 初始化）。
+>
+> 重装：再跑一次就会 `git fetch + reset --hard` 到最新 main。卸载：`npm unlink -g fine-code` 然后删掉 `~/.fineCode/src/`。
 
-# 或者本地开发
-git clone <repo>
+### 方式 2：手动从源码
+
+```bash
+git clone https://github.com/RickDamon/fineCode.git
 cd fineCode
 npm install
 npm run build
+npm link           # 把 `fine` 命令放到全局 PATH
+```
+
+### 方式 3：npm（待发布）
+
+```bash
+npm install -g fine-code    # 等 npm 包上线后可用；脚本会自动用这条路径
 ```
 
 > 要求 Node.js >= 18。
@@ -65,18 +80,23 @@ npm run build
 cd extension
 npm install
 npm run build          # esbuild 打包：dist/extension.js + dist/webview.js
-npm run package        # 产出 fine-code.vsix (~350KB)
+npm run package        # 产出 fine-code.vsix (~360KB)
 code --install-extension fine-code.vsix
 
-# 或者按 F5 在 Extension Development Host 里调试
+# 或者用 VS Code 打开 fineCode/ 仓库，按 F5 调试（在一个新的 Extension Development Host 窗口里加载扩展）
 ```
 
-特点：
+**特点**：
 - 同一套核心（Agent / Session / PermissionManager / Provider）**零改动复用**
-- CLI 和扩展读同一个 `~/.fineCode/config.json`、同一个 sessions 目录、同一套 anchors/skills/memory
-- 权限弹窗在 Webview 里以 inline dialog 方式出现
-- 斜杠命令 `/clear` `/model` `/cost` `/compact` `/sessions` `/diff` 都可用
-- 包体积 ~350KB，启动瞬间
+- CLI 和扩展读同一个 `~/.fineCode/config.json`、同一个 `~/.fineCode/sessions/`、同一套 anchors / skills / memory
+- 权限弹窗在 Webview 里以 inline dialog 方式出现（Allow once / Always allow / Deny）
+- 聊天流式渲染、工具调用可展开查看输出、状态栏显示 token / cost / 上下文占比
+- 斜杠命令 `/help` `/clear` `/model` `/cost` `/compact` `/sessions` `/diff` 都可用
+- 会话抽屉一键切换历史 session
+- 主题自适应（light/dark），用 VS Code CSS 变量
+- 包体积 ~360KB，启动瞬间
+
+**配置**：VS Code Settings 里搜 **fineCode**，可以设 `model` / `preset` / `apiKey` / `baseUrl` / `bypassPermissions`。优先级：**VS Code 设置 > env 变量 > `~/.fineCode/config.json`**（比 CLI 多一层，因为有的项目想用不同模型）。
 
 详见 [`extension/README.md`](./extension/README.md)。
 
@@ -90,7 +110,7 @@ fine init
 fine
 ```
 
-`fine init` 会引导你选择 preset（openai / deepseek / moonshot / openrouter / groq / together / ollama）、填入模型名和 API key，并保存到 `~/.fineCode/config.json`（文件权限 0600，仅所有者可读）。
+`fine init` 会引导你选择 preset（openai / deepseek / moonshot / zhipu / minimax / openrouter / groq / together / ollama）、填入模型名和 API key，并保存到 `~/.fineCode/config.json`（文件权限 0600，仅所有者可读）。
 
 ## 配置优先级
 

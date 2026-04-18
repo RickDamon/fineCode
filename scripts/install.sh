@@ -112,8 +112,59 @@ if ! command -v npm >/dev/null 2>&1; then
   fatal "npm not on PATH after Node install. Open a new terminal and re-run this script."
 fi
 
-step "Installing fine-code globally via npm"
-npm install -g fine-code
+# Where to clone / find the source checkout. Users can override via env.
+: "${FINE_CODE_SRC_DIR:=$HOME/.fineCode/src}"
+: "${FINE_CODE_REPO:=https://github.com/RickDamon/fineCode.git}"
+: "${FINE_CODE_BRANCH:=main}"
+# Set FINE_CODE_FROM_NPM=1 to force the (currently non-existent) npm tarball.
+: "${FINE_CODE_FROM_NPM:=0}"
+
+install_from_npm() {
+  step "Installing fine-code globally via npm"
+  npm install -g fine-code
+}
+
+install_from_source() {
+  step "Installing fine-code from source ($FINE_CODE_REPO)"
+
+  if ! command -v git >/dev/null 2>&1; then
+    fatal "git not found. Install git first, or set FINE_CODE_FROM_NPM=1 once the npm package is published."
+  fi
+
+  mkdir -p "$(dirname "$FINE_CODE_SRC_DIR")"
+
+  if [[ -d "$FINE_CODE_SRC_DIR/.git" ]]; then
+    info "Updating existing checkout at $FINE_CODE_SRC_DIR"
+    git -C "$FINE_CODE_SRC_DIR" fetch --quiet origin "$FINE_CODE_BRANCH"
+    git -C "$FINE_CODE_SRC_DIR" reset --hard --quiet "origin/$FINE_CODE_BRANCH"
+  else
+    info "Cloning into $FINE_CODE_SRC_DIR"
+    git clone --quiet --depth 1 --branch "$FINE_CODE_BRANCH" "$FINE_CODE_REPO" "$FINE_CODE_SRC_DIR"
+  fi
+
+  info "Installing dependencies (this takes ~15s)…"
+  (cd "$FINE_CODE_SRC_DIR" && npm install --silent --no-audit --no-fund)
+
+  info "Building (tsc)…"
+  (cd "$FINE_CODE_SRC_DIR" && npm run build --silent)
+
+  info "Linking the \`fine\` command globally…"
+  (cd "$FINE_CODE_SRC_DIR" && npm link --silent)
+}
+
+# Try npm first (when the package is finally published); fall back to source.
+# Rationale: keeping a single entry-point means users don't need to know
+# whether the registry version is live yet.
+if [[ "$FINE_CODE_FROM_NPM" == "1" ]]; then
+  install_from_npm
+else
+  if npm view fine-code version >/dev/null 2>&1; then
+    install_from_npm
+  else
+    warn "fine-code is not on the npm registry yet — installing from source."
+    install_from_source
+  fi
+fi
 
 # ---------- verify ----------
 step "Verifying installation"

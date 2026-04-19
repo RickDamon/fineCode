@@ -1,7 +1,7 @@
 {
   "name": "fine-code",
   "version": "0.1.0",
-  "description": "A minimal, model-agnostic coding agent inspired by Claude Code's harness philosophy",
+  "description": "A minimal, model-agnostic coding agent inspired by Claude Code's harness philosophy. Works with OpenAI / Claude / DeepSeek / Kimi / GLM / MiniMax / Ollama and any OpenAI-compatible endpoint.",
   "type": "module",
   "bin": {
     "fine": "./dist/cli.js",
@@ -32,8 +32,24 @@
     "claude",
     "openai",
     "deepseek",
-    "harness"
+    "kimi",
+    "moonshot",
+    "glm",
+    "zhipu",
+    "minimax",
+    "ollama",
+    "harness",
+    "tui",
+    "terminal"
   ],
+  "homepage": "https://github.com/RickDamon/fineCode#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RickDamon/fineCode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RickDamon/fineCode/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

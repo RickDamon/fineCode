@@ -51,10 +51,15 @@ export function microCompact(content: string, toolName?: string): MicroCompactRe
     const head = lines.slice(0, HEAD_LINES).join('\n');
     const tail = lines.slice(-TAIL_LINES).join('\n');
     const elided = lines.length - HEAD_LINES - TAIL_LINES;
+    // Explicit anti-loop wording: the elided segment is GONE from this view.
+    // Re-calling the same tool with identical arguments will just return the
+    // same head+tail again. Only a *different* offset/range will help.
     const marker =
-      `\n…[micro-compacted by fineCode: ${elided} lines / ${originalBytes - head.length - tail.length} bytes elided` +
-      (toolName ? ` from ${toolName}` : '') +
-      `. Call the tool again with offset/limit to see the elided section.]…\n`;
+      `\n…[micro-compacted: ${elided} lines / ${originalBytes - head.length - tail.length} bytes elided from the MIDDLE` +
+      (toolName ? ` of ${toolName}` : '') +
+      `. Do NOT re-call with the same arguments — you will get this same truncated view. ` +
+      `If the elided section matters, use offset/limit with a DIFFERENT range to seek into it, ` +
+      `or narrow the query (e.g. a more specific grep pattern / smaller path).]…\n`;
     return { content: `${head}${marker}${tail}`, compacted: true, originalBytes };
   }
 
@@ -62,8 +67,8 @@ export function microCompact(content: string, toolName?: string): MicroCompactRe
   const head = content.slice(0, HEAD_CHARS);
   const tail = content.slice(-TAIL_CHARS);
   const marker =
-    `\n…[micro-compacted: ${originalBytes - head.length - tail.length} bytes elided` +
-    (toolName ? ` from ${toolName}` : '') +
-    `]…\n`;
+    `\n…[micro-compacted: ${originalBytes - head.length - tail.length} bytes elided from the middle` +
+    (toolName ? ` of ${toolName}` : '') +
+    `. The elided bytes are NOT retrievable by re-calling with the same arguments.]…\n`;
   return { content: `${head}${marker}${tail}`, compacted: true, originalBytes };
 }

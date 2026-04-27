@@ -71,16 +71,45 @@ export class ProviderError extends Error {
 /** Pattern match to classify a raw error message / status. */
 function classify(status: number | undefined, msg: string): ProviderErrorKind {
   const m = msg.toLowerCase();
-  if (status === 401 || /invalid.*api.?key|unauthorized|authentication/.test(m)) return 'auth';
+  // ── Auth / key issues ──
+  // English: covers OpenAI / Anthropic / DeepSeek's English errors.
+  // Chinese: covers 智谱 / MiniMax / 文心一言 which frequently localize.
+  if (
+    status === 401 ||
+    /invalid.*api.?key|unauthorized|authentication|auth.?invalid/.test(m) ||
+    /api.?key.*(invalid|错误|失效|无效)/.test(m) ||
+    /无效.*(api.?key|密钥)|鉴权失败|身份.*未.*验证/.test(m)
+  ) return 'auth';
+
   if (status === 403 || /forbidden|permission.denied|disabled/.test(m)) return 'forbidden';
+
+  // ── Model not found ──
+  // Adds Ollama's "model 'X' not found, try pulling it first" signature as a
+  // distinct hint path, and the Chinese "模型不存在 / 无此模型" phrasing.
   if (
     status === 404 ||
-    /model.?not.?(exist|found)|no such model|unknown model|does not exist|not a valid model/.test(m)
-  )
-    return 'model';
+    /model.?not.?(exist|found)|no such model|unknown model|does not exist|not a valid model/.test(m) ||
+    /model.*not.*found.*pull/.test(m) ||
+    /模型.*(不存在|未找到|无效)/.test(m)
+  ) return 'model';
   if (status === 400 && /model/.test(m)) return 'model';
-  if (status === 402 || /insufficient.quota|billing|payment/.test(m)) return 'quota';
-  if (status === 429 || /rate.?limit|too many requests/.test(m)) return 'rate_limit';
+
+  // ── Quota / billing ──
+  // DeepSeek sends {code:"balance_not_enough"}; 智谱 GLM sends "余额不足";
+  // Moonshot sends English "insufficient_quota" on some tiers.
+  if (
+    status === 402 ||
+    /insufficient.quota|insufficient.balance|balance_not_enough|billing|payment/.test(m) ||
+    /余额不足|配额.*用尽|欠费|账户.*冻结/.test(m)
+  ) return 'quota';
+
+  // ── Rate limit ──
+  if (
+    status === 429 ||
+    /rate.?limit|too many requests/.test(m) ||
+    /请求.*过于.*频繁|频率.*超限/.test(m)
+  ) return 'rate_limit';
+
   if (status && status >= 500) return 'server';
   if (status === 400) return 'bad_request';
   if (/abort|aborted/.test(m)) return 'aborted';
@@ -110,6 +139,16 @@ function defaultHint(kind: ProviderErrorKind, ctx?: ProviderErrorContext): strin
         `  • Check your account/billing page on the provider's console`,
       ].join('\n');
     case 'model':
+      // Ollama is the one provider that tells you *exactly* how to fix a
+      // missing-model error, so surface its command verbatim.
+      if (preset === 'ollama' || /ollama/i.test(baseUrl ?? '')) {
+        return [
+          `Hint: Ollama doesn't have model "${model}" pulled locally.`,
+          `  • Run: ollama pull ${model}`,
+          `  • Then retry your request.`,
+          `  • List installed models: ollama list`,
+        ].join('\n');
+      }
       return [
         `Hint: model "${model}" is not recognized by the server${presetTip}.`,
         `  • Run \`fine doctor\` to list valid models`,
@@ -121,11 +160,25 @@ function defaultHint(kind: ProviderErrorKind, ctx?: ProviderErrorContext): strin
         `  • Wait a bit and retry`,
         `  • Or switch to a higher tier / different preset`,
       ].join('\n');
-    case 'quota':
+    case 'quota': {
+      // Per-provider top-up URLs so the user lands on the right page quickly.
+      // Kept as a small lookup — adding a provider is one line.
+      const topupUrls: Record<string, string> = {
+        deepseek: 'https://platform.deepseek.com/top_up',
+        moonshot: 'https://platform.moonshot.cn',
+        zhipu: 'https://open.bigmodel.cn/usercenter/pay',
+        minimax: 'https://platform.minimax.chat/user-center',
+        openai: 'https://platform.openai.com/settings/organization/billing',
+        anthropic: 'https://console.anthropic.com/settings/billing',
+      };
+      const url = preset && topupUrls[preset];
       return [
-        `Hint: your account has insufficient quota or billing issues${presetTip}.`,
-        `  • Top up / enable billing on the provider's console`,
+        `Hint: your account has insufficient quota or a billing issue${presetTip}.`,
+        url
+          ? `  • Top up / enable billing: ${url}`
+          : `  • Top up / enable billing on the provider's console`,
       ].join('\n');
+    }
     case 'bad_request':
       return `Hint: the provider rejected the request. Run \`fine doctor\` for a deeper check.`;
     case 'network':

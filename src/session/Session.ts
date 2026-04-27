@@ -43,6 +43,26 @@ export interface SessionMeta {
   messageCount: number;
   /** Active workflow mode: none / ddd / tdd / sdd. */
   mode?: 'none' | 'ddd' | 'tdd' | 'sdd';
+  /**
+   * How many auto-compact attempts have failed back-to-back. Used as a
+   * circuit breaker so a broken compaction path doesn't burn quota forever.
+   * Reset to 0 on any successful compaction.
+   */
+  consecutiveCompactFailures?: number;
+  /**
+   * The session-scoped todo list (mirrors TodoTool's state). Kept in meta so
+   * it survives Ctrl+C / `fine -c`, and so sibling subagents can't clobber
+   * the parent's list.
+   */
+  todos?: TodoEntry[];
+}
+
+/** Loose copy of TodoTool's item shape — declared here to avoid a circular
+ *  import (TodoTool reads and writes this via Session). */
+export interface TodoEntry {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
 }
 
 export interface SnapshotRecord {
@@ -168,7 +188,17 @@ export class Session {
     return [...this.snapshots];
   }
 
-  /** Re-read the log into a Message[] (used on resume). Side effect: populates snapshots. */
+  /**
+   * Re-read the log into a Message[] (used on resume). Side effect: populates
+   * snapshots.
+   *
+   * Post-processes the raw log through `normalizeForResume()` so that a session
+   * killed mid-tool-call doesn't explode on the next API request. Specifically:
+   *   - Strips tool_use entries whose tool_result was never written back.
+   *   - Drops resulting empty assistant shells.
+   *   - Appends a "continue from where you left off" user message if the log
+   *     ends with an interrupted turn.
+   */
   private replay(): Message[] {
     const raw = fs.readFileSync(this.logPath, 'utf8');
     const messages: Message[] = [];
@@ -190,8 +220,9 @@ export class Session {
         messages.push(...kept);
       }
     }
-    this.meta.messageCount = messages.length;
-    return messages;
+    const normalized = normalizeForResume(messages);
+    this.meta.messageCount = normalized.length;
+    return normalized;
   }
 
   private openLog(): fs.WriteStream {
@@ -266,6 +297,35 @@ export class Session {
     this.flushMeta();
   }
 
+  /** Circuit-breaker support for auto-compact. See SessionMeta docs. */
+  recordCompactSuccess(): void {
+    if (this.meta.consecutiveCompactFailures) {
+      this.meta.consecutiveCompactFailures = 0;
+      this.flushMeta();
+    }
+  }
+
+  recordCompactFailure(): number {
+    this.meta.consecutiveCompactFailures = (this.meta.consecutiveCompactFailures ?? 0) + 1;
+    this.flushMeta();
+    return this.meta.consecutiveCompactFailures;
+  }
+
+  /**
+   * Get/set the session's todo list. We store this in session meta (rather
+   * than as a module-level singleton) so that (a) concurrent subagents don't
+   * pollute each other's lists and (b) `fine -c` restores todos after a
+   * restart instead of silently losing them.
+   */
+  getTodos(): TodoEntry[] {
+    return this.meta.todos ? [...this.meta.todos] : [];
+  }
+
+  setTodos(todos: TodoEntry[]): void {
+    this.meta.todos = todos;
+    this.flushMeta();
+  }
+
   /** Read a previously-saved snapshot by hash. Returns null if missing. */
   readSnapshot(hash: string): Buffer | null {
     const p = path.join(this.snapshotDir, hash);
@@ -280,4 +340,82 @@ export class Session {
     this.logStream?.end();
     this.logStream = null;
   }
+}
+
+// ---------- resume-time normalization ----------
+
+/**
+ * Clean a replayed message list so the next API request doesn't reject it.
+ *
+ * When the process is killed (Ctrl+C, crash, network drop) mid-turn, the JSONL
+ * log can end in a few bad shapes that every provider dislikes:
+ *
+ *   1. Assistant message with `tool_use` entries whose matching `tool_result`
+ *      was never written. Anthropic explicitly errors:
+ *        "tool_use ids were found without tool_result blocks"
+ *
+ *   2. Assistant message that was streamed into the log but only contains
+ *      partial/empty content (model was generating when we died).
+ *
+ *   3. A trailing user message with no assistant reply — the model will
+ *      otherwise just continue where it left off with zero context on what
+ *      was interrupted.
+ *
+ * We fix each in the least-invasive way: filter, drop empty shells, and
+ * optionally append a short continuation prompt.
+ *
+ * Exported for unit tests.
+ */
+export function normalizeForResume(messages: Message[]): Message[] {
+  // Pass 1: collect all tool_result ids so we know which tool_use calls were
+  // resolved.
+  const resolvedIds = new Set<string>();
+  for (const m of messages) {
+    if (m.role === 'tool' && m.toolCallId) resolvedIds.add(m.toolCallId);
+  }
+
+  // Pass 2: rebuild list, pruning orphan tool_use entries + empty assistant
+  // shells. A "shell" is an assistant message whose text is blank AND whose
+  // only reason to exist was the (now dropped) orphan tool_use.
+  const out: Message[] = [];
+  for (const m of messages) {
+    if (m.role === 'assistant' && m.toolCalls?.length) {
+      const kept = m.toolCalls.filter(tc => resolvedIds.has(tc.id));
+      const hasText = typeof m.content === 'string' && m.content.trim().length > 0;
+      if (kept.length === 0 && !hasText) continue; // drop empty shell
+      out.push({
+        ...m,
+        toolCalls: kept.length > 0 ? kept : undefined,
+      });
+    } else if (m.role === 'tool') {
+      // Any tool_result whose parent tool_use got dropped above would be
+      // orphaned in the other direction. In practice our pass-1 logic means
+      // this shouldn't happen (we only ever dropped tool_use with NO result),
+      // but defense in depth:
+      if (!m.toolCallId || resolvedIds.has(m.toolCallId)) out.push(m);
+    } else {
+      out.push(m);
+    }
+  }
+
+  // Pass 3: if the log ends with a user message (model never replied), or with
+  // an assistant message that had orphan tool_calls stripped and now reads as
+  // "incomplete", append a short continuation prompt. This nudges the model
+  // to resume without pretending nothing was interrupted.
+  const last = out[out.length - 1];
+  const needsNudge =
+    last?.role === 'user' ||
+    (last?.role === 'assistant' &&
+      !(last.toolCalls && last.toolCalls.length > 0) &&
+      (typeof last.content !== 'string' || last.content.trim().length === 0));
+
+  if (needsNudge) {
+    out.push({
+      role: 'user',
+      content:
+        '[Previous turn was interrupted before completion. Continue from where you left off — no apology, pick up mid-thought.]',
+    });
+  }
+
+  return out;
 }

@@ -25,12 +25,25 @@ import { getModelRate } from '../constants/pricing.js';
 
 export const KEEP_TAIL_DEFAULT = 6;
 
-/** Auto-compact trigger: returns true if cumulative usage crosses 70% of the window. */
+/**
+ * Max consecutive auto-compact failures before we stop trying.
+ *
+ * Anecdote from Claude Code's own telemetry (quoted in BQ 2026-03 session
+ * review): "1,279 sessions had 50+ consecutive failures before we added the
+ * cap." We pick a conservative 3 — fail twice and the third time we give up
+ * until a successful manual /compact resets the counter.
+ */
+export const MAX_CONSECUTIVE_COMPACT_FAILURES = 3;
+
+/** Auto-compact trigger: returns true if cumulative usage crosses 70% of the window
+ *  AND the circuit breaker hasn't tripped. */
 export function shouldAutoCompact(
   model: string,
   usedTokens: number,
+  consecutiveFailures: number = 0,
   override?: number,
 ): boolean {
+  if (consecutiveFailures >= MAX_CONSECUTIVE_COMPACT_FAILURES) return false;
   const window = override ?? getModelRate(model).contextWindow;
   if (!window) return false;
   return usedTokens > window * 0.7;

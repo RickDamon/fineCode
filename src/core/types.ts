@@ -63,6 +63,13 @@ export interface ToolExecutionContext {
    * Agent installs this when it calls the tool; it's `undefined` outside that flow.
    */
   forwardEvent?: (ev: unknown) => void;
+  /**
+   * Parent agent's permission prompt, propagated down into tools that create
+   * nested agents (SpawnAgentTool). Lets a subagent bubble tool-permission
+   * requests up to the real UI instead of auto-denying — otherwise a subagent
+   * that tries to call `bash`/`edit_file` dies immediately.
+   */
+  parentPermissionPrompt?: import('../permission/PermissionManager.js').PermissionPrompt;
 }
 
 export interface ToolResult {

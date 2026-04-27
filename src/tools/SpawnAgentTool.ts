@@ -180,7 +180,12 @@ async function runSubagent(
     provider,
     tools: subTools,
     permissionManager: new PermissionManager({ bypass: false }),
-    permissionPrompt: async () => 'deny',
+    // Bubble permission requests up to the parent's prompt when we have one.
+    // This lets subagents configured with write-capable tools (e.g. a
+    // 'hard-debug' preset with edit_file + bash) actually work — previously
+    // they would auto-deny the first permission check and die. Falls back to
+    // deny when no parent prompt exists (e.g. running standalone).
+    permissionPrompt: execCtx.parentPermissionPrompt ?? (async () => 'deny'),
     systemPrompt: baseSystemPrompt,
     cwd: spawnCtx.cwd,
     maxTurns: preset?.maxTurns ?? 20,

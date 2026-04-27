@@ -24,11 +24,33 @@ export class AnthropicProvider implements Provider {
   async *stream(options: QueryOptions): AsyncGenerator<StreamEvent, void, unknown> {
     const { messages, tools } = this.toAnthropicFormat(options.messages, options.tools);
 
+    // ── Prompt caching (Anthropic ephemeral cache) ──
+    // Anthropic charges 10% of input cost on cache hits. Long coding sessions
+    // resend identical system prompts + tool schemas every turn — caching them
+    // cuts real spend by ~50% for users on Claude.
+    //
+    // We split the system prompt at the first "# Environment" header (if any).
+    // Everything above it is considered static (core prompt, FINE.md, skills),
+    // gets cache_control. Everything from "# Environment" onward contains
+    // wall-clock / git branch / cwd listing which drift every run, so we leave
+    // it uncached to preserve the cache prefix for the static half.
+    const systemBlocks = splitSystemForCache(options.systemPrompt);
+
+    // Tools rarely change within a session. We mark the LAST tool with
+    // cache_control so everything up to and including it becomes a cache
+    // breakpoint (per Anthropic's cache rules: a cache_control marker caches
+    // the entire prefix up to that position).
+    const cachedTools = tools && tools.length > 0
+      ? tools.map((t, i) =>
+          i === tools.length - 1 ? { ...t, cache_control: { type: 'ephemeral' } } : t,
+        )
+      : tools;
+
     const body = {
       model: this.model,
       messages,
-      system: options.systemPrompt,
-      tools,
+      system: systemBlocks,
+      tools: cachedTools,
       max_tokens: options.maxTokens ?? 4096,
       temperature: options.temperature ?? 0.7,
       stream: true,
@@ -84,7 +106,10 @@ export class AnthropicProvider implements Provider {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      const lines = buffer.split('\n');
+      // Accept both \n and \r\n line separators. Cloudflare / some proxies
+      // insert \r before \n; splitting on \n alone would leave a trailing
+      // \r on every data: line which then fails JSON.parse silently.
+      const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
 
       for (const line of lines) {
@@ -190,4 +215,37 @@ function safeParse(s: string): unknown {
   } catch {
     return {};
   }
+}
+
+/**
+ * Cut the system prompt into two content blocks for Anthropic:
+ *   [ { static, cache_control }, { dynamic } ]
+ *
+ * The static half is everything before the first `# Environment` (or
+ * `## Environment`) heading — that's where buildSystemPrompt() injects
+ * per-run state (cwd, git branch, current date). Caching the static prefix
+ * yields a ~90% input-token discount on cache hits; the dynamic tail stays
+ * cheap because it's short anyway.
+ *
+ * If no `# Environment` marker is present we cache the whole thing as one
+ * block — safe, just slightly less efficient on re-runs that change (none of
+ * our callers currently skip the marker, but be defensive).
+ */
+function splitSystemForCache(
+  systemPrompt: string,
+): Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> {
+  const marker = systemPrompt.search(/^#{1,2}\s*Environment\b/m);
+  if (marker < 0) {
+    return [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+  }
+  const staticPart = systemPrompt.slice(0, marker).trimEnd();
+  const dynamicPart = systemPrompt.slice(marker);
+  // Anthropic requires every block to be non-empty.
+  if (!staticPart) {
+    return [{ type: 'text', text: dynamicPart }];
+  }
+  return [
+    { type: 'text', text: staticPart, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: dynamicPart },
+  ];
 }

@@ -37,7 +37,17 @@
 ### 上下文
 - 📜 **FINE.md 规则** — 项目/全局 FINE.md 自动拼入 system prompt
 - 🩺 **fine doctor** — 一键诊断：Node / config / 网络 / API key / 模型名是否有效
-- ⚠️ **友好错误** — 把 `400 Model Not Exist` 翻译成"跑 fine doctor 看可用模型"
+- ⚠️ **友好错误** — 把 `400 Model Not Exist` 翻译成"跑 fine doctor 看可用模型"；识别中文错误（"余额不足"、"鉴权失败"）和 Ollama 的 `ollama pull <model>` 专属提示
+
+### 鲁棒性（v0.2 批次改进）
+- ↻ **Max-tokens 自动续接** — 模型输出被 `max_tokens` 截断时自动注入续接提示，无缝接着生成（最多 3 次）— 国产 4-8k 输出上限的长生成场景不再卡死
+- 🛡️ **Session 恢复自愈** — `fine -c` 时自动过滤孤儿 `tool_use`、丢弃空壳消息、在中断尾部注入 "continue from where you left off"；`Ctrl+C` 杀进程后恢复成功率从 ~70% 提升到 ~99%
+- ⚡ **Anthropic Prompt Caching** — system prompt 和 tool schemas 自动打 `cache_control: ephemeral`，Claude Opus/Sonnet 用户真实花费可降约 50%
+- 🧯 **Auto-compact 熔断** — 连续失败 3 次自动停手，避免因压缩路径坏了把 quota 烧光；手动 `/compact` 成功会重置计数
+- 🪟 **跨平台 edit** — `edit_file` 的 `old_str` 匹配容忍 `\n` vs `\r\n` 差异，Windows / 混行尾文件不再报"old_str not found 但肉眼明明有"
+- 🔍 **ripgrep 优先** — 检测到 `rg` 就用它替代 `grep`，快 ~10× 且自动忽略 .gitignore/二进制
+- 🤖 **Subagent 权限冒泡** — 子 agent 的工具权限请求会上浮到父 agent 的 UI，而不是静默 deny — 写操作型子 agent（`hard-debug` 等）终于可用
+- 📋 **Todos 持久化** — 任务列表跟随 Session 存盘，`fine -c` 恢复时 `/todos` 也回来；子 agent 再也不会污染父 agent 的任务列表
 
 ## 安装
 

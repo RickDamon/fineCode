@@ -149,12 +149,16 @@ export function REPL({ agent, modelName, session, setSession, profile, onPermiss
     setItems(prev => [...prev, { kind: 'user', text }]);
 
     // Auto-compact check BEFORE firing the turn, so a huge context doesn't crash the request.
-    const model = session.getMeta().model;
-    if (shouldAutoCompact(model, usage.totalTokens)) {
+    // The circuit breaker (consecutiveCompactFailures) prevents a broken
+    // compaction path from burning quota on every turn.
+    const meta = session.getMeta();
+    const model = meta.model;
+    if (shouldAutoCompact(model, usage.totalTokens, meta.consecutiveCompactFailures ?? 0)) {
       setCompacting(true);
       try {
         const { summary, kept } = await compactHistory(agent.getHistory(), model, KEEP_TAIL_DEFAULT);
         const dropped = agent.compactWithSummary(summary, kept);
+        session.recordCompactSuccess();
         setItems(prev => [
           ...prev,
           {
@@ -164,9 +168,15 @@ export function REPL({ agent, modelName, session, setSession, profile, onPermiss
           },
         ]);
       } catch (e) {
+        const n = session.recordCompactFailure();
         setItems(prev => [
           ...prev,
-          { kind: 'error', text: `Auto-compact failed: ${(e as Error).message}` },
+          {
+            kind: 'error',
+            text:
+              `Auto-compact failed (${n}×): ${(e as Error).message}` +
+              (n >= 3 ? ' — circuit breaker tripped, will not retry until a successful /compact.' : ''),
+          },
         ]);
       } finally {
         setCompacting(false);

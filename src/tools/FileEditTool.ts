@@ -102,19 +102,21 @@ export const FileEditTool: ToolDefinition<FileEditInput> = {
     const absPath = isAbsolute(input.path) ? input.path : resolve(ctx.cwd, input.path);
     try {
       const original = await fs.readFile(absPath, 'utf8');
-      const idx = original.indexOf(input.old_str);
-      if (idx === -1) {
+      // CRLF-tolerant unique match. A plain indexOf would fail on Windows /
+      // mixed-origin files even when the content is visually identical.
+      const match = findUniqueWithCrlf(original, input.old_str);
+      if (match.count === 0) {
         return { content: `old_str not found in file: ${absPath}`, isError: true };
       }
-      const lastIdx = original.lastIndexOf(input.old_str);
-      if (idx !== lastIdx) {
+      if (match.count > 1) {
         return {
           content: `old_str appears multiple times in ${absPath}. Provide more context to make it unique.`,
           isError: true,
         };
       }
       await takeSnapshot(absPath, ctx);
-      const updated = original.slice(0, idx) + input.new_str + original.slice(idx + input.old_str.length);
+      const updated =
+        original.slice(0, match.start) + input.new_str + original.slice(match.end);
       await fs.writeFile(absPath, updated, 'utf8');
       return { content: `Edited ${absPath}` };
     } catch (err) {
@@ -122,3 +124,44 @@ export const FileEditTool: ToolDefinition<FileEditInput> = {
     }
   },
 };
+
+/**
+ * Find `needle` in `haystack` tolerating line-ending differences.
+ *
+ * Why: models construct `old_str` by reading tool output where newlines are
+ * already \n, but the file on disk may be CRLF (Windows or mixed-origin file).
+ * A raw `indexOf` will then miss the match and throw the dreaded "old_str not
+ * found" error even when the text is visually identical.
+ *
+ * Strategy: build a regex from `needle` where every \r?\n in the needle
+ * matches either \n or \r\n in the haystack. Anchor everything else exactly.
+ *
+ * Returns the unique match's [start, end) in the ORIGINAL haystack (so the
+ * surrounding splice preserves whatever line-endings the file had).
+ * Returns `{ count: 0 }` if not found, `{ count: N }` if found >1 times.
+ */
+function findUniqueWithCrlf(
+  haystack: string,
+  needle: string,
+): { count: number; start?: number; end?: number } {
+  const segments = needle.split(/\r?\n/);
+  const escapedSegments = segments.map(escapeRegex);
+  const pattern = escapedSegments.join('\\r?\\n');
+  const re = new RegExp(pattern, 'g');
+
+  let first: RegExpExecArray | null = null;
+  let count = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(haystack)) !== null) {
+    count++;
+    if (!first) first = m;
+    if (count > 1) break;
+    if (m.index === re.lastIndex) re.lastIndex++;
+  }
+  if (!first) return { count: 0 };
+  return { count, start: first.index, end: first.index + first[0].length };
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

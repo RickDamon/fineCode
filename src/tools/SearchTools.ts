@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { resolve, isAbsolute, relative } from 'node:path';
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from '../core/types.js';
@@ -18,11 +18,25 @@ interface LsInput {
   path?: string;
 }
 
-/** Grep using system grep; falls back to a JS implementation if grep missing. */
+/**
+ * Prefer ripgrep (`rg`) when installed: faster, ignores .gitignore by
+ * default, skips binary files. Falls back to POSIX `grep` with explicit
+ * exclude-dirs. Detected once at module load — users who install rg
+ * mid-session should restart.
+ */
+const HAS_RG: boolean = (() => {
+  try {
+    return spawnSync('which', ['rg']).status === 0;
+  } catch {
+    return false;
+  }
+})();
+
+/** Grep using ripgrep when available, falling back to system grep. */
 export const GrepTool: ToolDefinition<GrepInput> = {
   name: 'grep',
   description:
-    'Search for a regex pattern in files under a directory. Returns matching lines with file paths and line numbers. Uses ripgrep-style semantics via system grep. Excludes common heavy dirs (node_modules, .git, dist).',
+    'Search for a regex pattern in files under a directory. Returns matching lines with file paths and line numbers. Uses ripgrep when installed (auto-ignores .gitignore and binaries), otherwise POSIX grep with common excludes (node_modules, .git, dist).',
   parameters: {
     type: 'object',
     properties: {
@@ -33,13 +47,31 @@ export const GrepTool: ToolDefinition<GrepInput> = {
     required: ['pattern'],
   },
   needsPermission: 'never',
-  renderCall: input => `grep "${input.pattern}" in ${input.path ?? '.'}`,
+  renderCall: input =>
+    `${HAS_RG ? 'rg' : 'grep'} "${input.pattern}" in ${input.path ?? '.'}`,
   execute: async (input, ctx) => {
     const base = input.path
       ? isAbsolute(input.path)
         ? input.path
         : resolve(ctx.cwd, input.path)
       : ctx.cwd;
+
+    if (HAS_RG) {
+      const args = [
+        '--line-number',
+        '--no-heading',
+        '--color', 'never',
+        // rg respects .gitignore by default; no need for --exclude-dir flags.
+        // Keep it case-insensitive by default to match the old grep behavior.
+        ...(input.caseSensitive ? [] : ['--ignore-case']),
+        '--',
+        input.pattern,
+        base,
+      ];
+      return runProc('rg', args, ctx);
+    }
+
+    // POSIX grep fallback.
     const args = [
       '-r',
       '-n',
@@ -135,8 +167,9 @@ function runProc(
     child.on('close', code => {
       ctx.abortSignal.removeEventListener('abort', onAbort);
       const out = stdout.trim();
-      // grep returns 1 when no match — not an error for our purposes
-      if (code === 0 || (cmd === 'grep' && code === 1)) {
+      // Both grep and rg exit 1 when there are no matches — that's not an
+      // error for our purposes.
+      if (code === 0 || ((cmd === 'grep' || cmd === 'rg') && code === 1)) {
         resolve({ content: out || '(no matches)' });
       } else {
         resolve({ content: stderr.trim() || `exit ${code}`, isError: true });

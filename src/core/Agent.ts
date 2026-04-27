@@ -160,6 +160,12 @@ export class Agent {
 
     const maxTurns = this.config.maxTurns ?? 50;
 
+    // How many times in a row we've injected a "continue from where you left
+    // off" nudge after hitting max_output_tokens. We cap this to avoid getting
+    // stuck in a length loop on a model that just can't shut up.
+    let consecutiveLengthRetries = 0;
+    const MAX_LENGTH_RETRIES = 3;
+
     for (let turn = 0; turn < maxTurns; turn++) {
       if (abortSignal.aborted) {
         yield { type: 'error', error: new Error('Aborted by user') };
@@ -171,6 +177,7 @@ export class Agent {
       const toolIdToIndex = new Map<string, number>();
       let errored: Error | null = null;
       let turnUsage: Usage | undefined;
+      let finishReason: string | undefined;
 
       const stream = this.provider.stream({
         messages: this.history,
@@ -195,6 +202,7 @@ export class Agent {
           break;
         } else if (event.type === 'done') {
           turnUsage = event.usage;
+          finishReason = event.finishReason;
           break;
         }
       }
@@ -235,6 +243,40 @@ export class Agent {
       this.config.session?.recordMessage(assistantMsg);
       yield { type: 'assistant_done', message: assistantMsg };
 
+      // ── max_output_tokens recovery ──
+      // Chinese OSS models (Kimi / GLM / MiniMax) default to 4-8k output,
+      // which is tiny for code generation. When the provider reports the
+      // response was cut at the token limit AND there are no tool calls (we
+      // only continue plain-text interruptions — tool_calls are a natural
+      // stop), inject a nudge and let the loop take another turn.
+      //
+      // Capped by MAX_LENGTH_RETRIES to avoid runaway on verbose models.
+      if (finishReason === 'length' && toolCalls.length === 0) {
+        if (consecutiveLengthRetries >= MAX_LENGTH_RETRIES) {
+          yield {
+            type: 'info',
+            text: `Output hit max_tokens ${consecutiveLengthRetries + 1}× in a row — stopping retries. Consider raising maxTokens or breaking the task down.`,
+          };
+          yield { type: 'turn_done' };
+          return;
+        }
+        consecutiveLengthRetries += 1;
+        const nudge: Message = {
+          role: 'user',
+          content:
+            '[system] Output was cut at the token limit. Continue from exactly where you left off — no apology, no recap, pick up mid-sentence.',
+        };
+        this.history.push(nudge);
+        this.config.session?.recordMessage(nudge);
+        yield {
+          type: 'info',
+          text: `↻ Output hit max_tokens, auto-continuing (${consecutiveLengthRetries}/${MAX_LENGTH_RETRIES})…`,
+        };
+        continue; // next loop iteration re-streams from the model
+      }
+      // Any non-length finish resets the counter.
+      consecutiveLengthRetries = 0;
+
       if (toolCalls.length === 0) {
         yield { type: 'turn_done' };
         return;
@@ -274,11 +316,26 @@ export class Agent {
     const done: boolean[] = calls.map(() => false);
 
     // Start each tool's generator; each one drains into its own queue.
+    // We wrap the generator in a try/catch: without it, a thrown error inside
+    // executeTool would bubble as an unhandled promise rejection AND leave
+    // done[i]=false, which in turn would make the drain loop spin forever.
     const runners = calls.map(async (call, i) => {
-      for await (const ev of this.executeTool(call, abortSignal)) {
-        queues[i]!.push(ev);
+      try {
+        for await (const ev of this.executeTool(call, abortSignal)) {
+          queues[i]!.push(ev);
+        }
+      } catch (err) {
+        const tool = this.toolMap.get(call.name);
+        queues[i]!.push({
+          type: 'tool_result',
+          call,
+          tool: tool ?? ({ name: call.name } as ToolDefinition),
+          content: `Runner crashed: ${(err as Error).message}`,
+          isError: true,
+        });
+      } finally {
+        done[i] = true;
       }
-      done[i] = true;
     });
 
     // Rate-limit: only maxPar active at a time. For simplicity, just start them
@@ -364,6 +421,10 @@ export class Agent {
         session: this.config.session,
         toolCallId: call.id,
         forwardEvent,
+        // Pass our own permission prompt down so any nested-agent tool
+        // (SpawnAgentTool) can bubble permission requests back up to the
+        // real UI rather than silently denying.
+        parentPermissionPrompt: this.config.permissionPrompt,
       };
       const execPromise = tool.execute(input, ctx);
 

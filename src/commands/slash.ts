@@ -149,6 +149,8 @@ const COMMANDS: SlashCommand[] = [
       try {
         const { summary, kept } = await compactHistory(history, meta.model);
         const dropped = ctx.agent.compactWithSummary(summary, kept);
+        // Manual success clears the auto-compact circuit breaker too.
+        ctx.session.recordCompactSuccess();
         return {
           lines: [
             `Compacted ${dropped} messages into a ${summary.length}-byte summary.`,
@@ -157,6 +159,7 @@ const COMMANDS: SlashCommand[] = [
           level: 'ok',
         };
       } catch (e) {
+        ctx.session.recordCompactFailure();
         return { lines: [`Compact failed: ${(e as Error).message}`], level: 'error' };
       }
     },
